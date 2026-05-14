@@ -1,0 +1,17 @@
+{
+  "kill_switch_default": true,
+  "trading_mode_default": "paper",
+  "live_trading_enabled_default": false,
+  "max_dollars_per_trade_paper": 10,
+  "max_dollars_per_trade_live_test": 1,
+  "max_bankroll_pct_per_trade": 0.5,
+  "max_daily_loss": 20,
+  "max_trades_per_day": 5,
+  "max_category_exposure": 25,
+  "max_correlated_exposure": 15,
+  "max_spread_cents": 6,
+  "min_liquidity": 500,
+  "no_new_entries_under_minutes": 20,
+  "never_enter_under_minutes": 5,
+  "rules_require_human_approval": true
+}
