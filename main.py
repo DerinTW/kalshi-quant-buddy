@@ -29,6 +29,16 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--monitor-only",
+        action="store_true",
+        help=(
+            "Run exactly ONE pass of monitor.check_positions over the open "
+            "paper trades and exit. This is not a loop. Monitor never "
+            "places live orders — it only inspects open paper positions "
+            "and may close them at the deterministic exit price."
+        ),
+    )
+    parser.add_argument(
         "--max-candidates",
         type=int,
         default=None,
@@ -47,6 +57,10 @@ def main() -> None:
 
     if args.run_once:
         _run_once_cli(cfg, args)
+        return
+
+    if args.monitor_only:
+        _monitor_only_cli(cfg)
         return
 
     # Default path: NO autonomous trading loop is started.
@@ -91,6 +105,41 @@ def _run_once_cli(cfg, args) -> None:
     )
     # Surface a JSON-safe summary to stdout for operators.
     print(json.dumps(_jsonable(summary), indent=2, default=str))
+
+
+def _monitor_only_cli(cfg) -> None:
+    """
+    Run exactly ONE pass of monitor.check_positions and exit.
+
+    Hard guarantees:
+      - No loop, no scheduler, no background work.
+      - Imports monitor lazily so default --init-only stays cheap.
+      - Monitor never places live orders; it inspects open paper positions
+        and may close them at the deterministic exit price.
+      - If no Kalshi client can be built (missing credentials), we log and
+        exit safely without raising — there is nothing to monitor.
+    """
+    import monitor  # lazy import — keeps default startup minimal
+
+    client = _build_client_if_credentials_present(cfg)
+    if client is None:
+        logger.warn(
+            "main", "monitor_only_no_client",
+            "Kalshi credentials missing — cannot fetch live quotes. "
+            "Monitor pass skipped; open paper trades are unchanged.",
+        )
+        return
+
+    try:
+        monitor.check_positions(client, cfg)
+    except Exception as exc:
+        logger.error("main", "monitor_only_failed", err=str(exc))
+        return
+
+    logger.info(
+        "main", "monitor_only_done",
+        "single monitor pass complete — exiting (no loop)",
+    )
 
 
 def _build_client_if_credentials_present(cfg) -> Optional[object]:

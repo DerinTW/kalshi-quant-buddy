@@ -34,6 +34,7 @@ import edge as edge_mod
 import filters as filters_mod
 import logger
 import market_scanner
+from market_scanner import _derive_event_ticker
 import position_sizing
 import prediction_model
 import research_agents
@@ -200,6 +201,11 @@ def run_once(
         open_positions = []
     bankroll = cfg.paper_bankroll
     markets_by_event = _group_by_event(passed)
+    # Map every fetched market by ticker so the exposure helper can resolve
+    # an open trade's category against the same scan. Built from `markets`
+    # (not just `passed`) so a market that failed a filter today still
+    # contributes its category information.
+    markets_by_ticker: dict[str, Market] = {m.ticker: m for m in markets}
 
     research_budget = cap_research
 
@@ -263,13 +269,23 @@ def run_once(
                     summary=summary, stage="sizing", ticker=ticker,
                 )
                 if sizing_result is not None:
+                    cat_exposure, corr_exposure = compute_open_exposures(
+                        market, open_positions, markets_by_ticker,
+                    )
+                    logger.debug(
+                        _MODULE, "exposures",
+                        ticker=ticker,
+                        category=market.category,
+                        category_exposure=round(cat_exposure, 2),
+                        correlated_exposure=round(corr_exposure, 2),
+                    )
                     risk_result = _safe_call(
                         deps.risk_assess,
                         sizing_result, market, edge_result,
                         open_positions, 0.0, 0, bankroll, cfg,
                         kwargs={
-                            "category_exposure": 0.0,
-                            "correlated_exposure": 0.0,
+                            "category_exposure": cat_exposure,
+                            "correlated_exposure": corr_exposure,
                             "action_type": "entry",
                             "live_buy_guard": trading.live_buy_guard,
                         },
@@ -390,6 +406,59 @@ def _group_by_event(markets: list[Market]) -> dict[str, list[Market]]:
         key = m.event_ticker or m.ticker
         by_event.setdefault(key, []).append(m)
     return by_event
+
+
+def compute_open_exposures(
+    market: Market,
+    open_positions: list[TradeRecord],
+    markets_by_ticker: Optional[dict[str, Market]] = None,
+) -> tuple[float, float]:
+    """
+    Deterministic open-exposure calculation in dollars-at-risk.
+
+    Returns: (category_exposure, correlated_exposure)
+
+    Correlated exposure
+      Sums ``dollars_at_risk`` for every open trade whose event group matches
+      the candidate market's. Event group is taken from the candidate's
+      ``event_ticker`` (or derived from its ticker) and compared to the same
+      derivation applied to each open trade's ticker.
+
+    Category exposure
+      ``TradeRecord`` does not store the trade's market category. To compute
+      this without a schema change, we look the trade's ticker up in the
+      current-scan market map. If a match is present, we use that market's
+      category. If no match is available (e.g. the original market has since
+      closed or was filtered out), we **fail safe** and count the trade
+      toward the candidate's category — i.e. we err on the side of MORE
+      restriction, not less.
+    """
+    markets_by_ticker = markets_by_ticker or {}
+    candidate_event = market.event_ticker or _derive_event_ticker(market.ticker)
+    candidate_category = (market.category or "").strip()
+
+    cat_exposure = 0.0
+    corr_exposure = 0.0
+
+    for trade in open_positions:
+        dollars = float(trade.dollars_at_risk or 0.0)
+        if dollars <= 0:
+            continue
+
+        trade_event = _derive_event_ticker(trade.ticker)
+        if candidate_event and trade_event == candidate_event:
+            corr_exposure += dollars
+
+        peer = markets_by_ticker.get(trade.ticker)
+        if peer is not None:
+            peer_category = (peer.category or "").strip()
+            if peer_category and candidate_category and peer_category == candidate_category:
+                cat_exposure += dollars
+        else:
+            # Fail-safe: unknown peer category → assume same as candidate.
+            cat_exposure += dollars
+
+    return cat_exposure, corr_exposure
 
 
 def _no_trade_decision(ticker: str, reason: str) -> dict[str, Any]:
