@@ -16,12 +16,17 @@ The LLM IS used for:
                                             invalidation_conditions fields
   5. Producing structured decision JSON   → every public function in this
                                             module returns JSON-shaped dicts
+  6. Adding risk-control caution          -> run_risk_control_review may add
+                                            flags, rejection reasons, or human
+                                            confirmation requirements
 
 The LLM is NEVER used for:
   A. Direct order placement
      - trading.py and kalshi_client.py must not import this module.
   B. Overriding the risk manager
      - risk_manager.py must not import this module.
+     - The risk-control reviewer cannot approve any trade rejected by
+       deterministic risk checks.
   C. Uncapped probability jumps
      - prediction_model.py clamps the LLM's yes_probability to ±10pp from
        the market mid before blending, and weights it at only 5% of the
@@ -40,6 +45,7 @@ keep the system prompt explicit about not inventing facts, and add a row to
 tests/test_llm_role.py if a new caller is permitted to import this module.
 """
 from __future__ import annotations
+from dataclasses import asdict, is_dataclass
 import json
 from typing import Any
 
@@ -221,19 +227,112 @@ Respond ONLY with valid JSON matching this schema:
   "invalidation_conditions": ["condition that would change your estimate", ...]
 }"""
 
-_POSTMORTEM_SYSTEM = """You are a trade reviewer for a prediction market trading system.
-Analyze a completed trade that resulted in a loss and produce a structured postmortem.
-Be honest and specific. Identify whether the loss was bad luck (variance) or a bad process.
-Respond ONLY with valid JSON matching this schema:
+
+_PROBABILITY_ESTIMATOR_SYSTEM = """You are a probability calibration engine for a prediction-market system.
+
+Your job:
+- Estimate the true probability of the YES outcome.
+- Use the market-implied probability as the anchor.
+- Adjust only when the provided evidence justifies it.
+- Treat official data, reliable market data, and credible news as stronger than social sentiment.
+- Treat social-only claims, rumors, missing data, stale data, contradictions, thin liquidity, wide spreads, and unclear resolution rules as uncertainty factors.
+- Do not recommend a trade.
+- Do not calculate edge.
+- Do not suggest side, entry, exit, or position size.
+- Do not place orders.
+- Do not override risk controls.
+- Do not invent missing facts.
+- Return only valid JSON.
+
+Respond ONLY with valid JSON matching this schema exactly:
 {
-  "was_variance": <bool>,
-  "data_was_stale": <bool>,
-  "resolution_handled_correctly": <bool>,
-  "liquidity_hurt": <bool>,
-  "sizing_appropriate": <bool>,
-  "analysis": "<3-5 sentences of honest analysis>",
-  "rule_change_proposal": "<specific rule change to consider, or 'none'>"
+  "estimated_yes_probability": 0.0,
+  "estimated_no_probability": 0.0,
+  "confidence": 0.0,
+  "main_factors": [],
+  "uncertainty_factors": [],
+  "probability_rationale": "...",
+  "overconfidence_warning": true
+}
+
+Field rules:
+- estimated_yes_probability: float from 0.0 to 1.0.
+- estimated_no_probability: must equal 1.0 - estimated_yes_probability, rounded safely.
+- confidence: float from 0.0 to 1.0.
+- main_factors: short strings explaining the strongest evidence-based drivers.
+- uncertainty_factors: short strings explaining missing/conflicting/stale/weak evidence.
+- probability_rationale: concise explanation of why the estimate differs from, or stays near, the market baseline.
+- overconfidence_warning: true when evidence is weak, social-driven, contradictory, stale, sparse, or the estimate moves far from the market baseline."""
+
+_RISK_CONTROL_REVIEW_SYSTEM = """You are a risk-control reviewer. You do not seek profit. You prevent bad trades.
+
+Rules:
+- If any hard risk limit is violated, reject the trade.
+- Never override deterministic risk rules.
+- Be stricter near resolution.
+- Be stricter with illiquid markets.
+- Be stricter with correlated exposure.
+- Return only JSON.
+
+Output:
+{
+  "approved": true/false,
+  "rejection_reasons": [],
+  "risk_flags": [],
+  "max_allowed_dollars": 0.0,
+  "requires_human_confirmation": true/false
 }"""
+
+_POSTMORTEM_SYSTEM = """You are a postmortem reviewer for a prediction-market trading system.
+
+Your job is to explain why a losing trade lost and whether the process was flawed.
+
+Rules:
+- Do not assume all losses are bad decisions.
+- Separate bad process from bad outcome.
+- Identify stale data, bad reasoning, bad sizing, execution issues, and market-structure issues.
+- Propose rule changes, but mark them as requiring human approval.
+- Do not recommend a new trade.
+- Do not place orders.
+- Do not override the risk manager.
+- Do not edit live rules, config, .env, or execution settings.
+- If evidence is missing, say so instead of inventing causes.
+- Return only valid JSON.
+
+Required JSON output:
+{
+  "trade_id": "...",
+  "good_process_bad_outcome": true,
+  "root_causes": [],
+  "data_quality_issues": [],
+  "reasoning_issues": [],
+  "risk_issues": [],
+  "execution_issues": [],
+  "market_structure_issues": [],
+  "proposed_rule_changes": [
+    {
+      "rule": "...",
+      "reason": "...",
+      "priority": "low|medium|high",
+      "requires_human_approval": true
+    }
+  ],
+  "should_update_rules_file": false
+}
+
+Field rules:
+- trade_id must exactly match the input trade_id.
+- good_process_bad_outcome should be true only when the trade followed the intended process but lost due to variance, unavoidable uncertainty, or a correctly sized risk that resolved against the thesis.
+- root_causes should summarize the main causes of the loss.
+- data_quality_issues should include stale, missing, contradictory, low-credibility, or poorly timestamped data.
+- reasoning_issues should include overconfidence, ignored contradictions, bad probability adjustment, weak resolution-rule interpretation, or social-media overreaction.
+- risk_issues should include oversizing, excessive correlated exposure, taking a trade too close to resolution, violating spread/liquidity rules, or weak confidence/edge discipline.
+- execution_issues should include bad entry, bad limit price, late fill, partial fill, failure to exit, spread crossing, or slippage.
+- market_structure_issues should include thin book, wide spread, stale book, related-market disagreement, liquidity gap, or manipulation/rumor-driven movement.
+- proposed_rule_changes must be suggestions only.
+- Every proposed rule change must include "requires_human_approval": true.
+- should_update_rules_file should be true only when there is a concrete rule-change proposal worth writing to pending review.
+- If no useful rule change is justified, proposed_rule_changes should be [] and should_update_rules_file should be false."""
 
 
 _EXTRACT_ITEMS_SYSTEM = """You are a structured data extractor for a prediction market research system.
@@ -582,6 +681,452 @@ def research(cfg: Config, ticker: str, title: str, rules: str) -> dict[str, Any]
     return research_agent_evidence(cfg, ticker, title, rules, raw_text="")
 
 
+_RISK_REVIEW_KEYS = {
+    "approved",
+    "rejection_reasons",
+    "risk_flags",
+    "max_allowed_dollars",
+    "requires_human_confirmation",
+}
+
+
+def _structured(value: Any) -> Any:
+    if is_dataclass(value):
+        return asdict(value)
+    if isinstance(value, dict):
+        return {str(k): _structured(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_structured(v) for v in value]
+    if isinstance(value, tuple):
+        return [_structured(v) for v in value]
+    return value
+
+
+def _risk_string_list(value: Any, *, max_items: int = 16, max_len: int = 200) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value[:max_items]:
+        text = str(item).strip()
+        if text:
+            out.append(text[:max_len])
+    return out
+
+
+def _risk_safe_dollars(value: Any, default: float = 0.0) -> float:
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return max(0.0, default)
+
+
+def _risk_review_fallback(reason: str) -> dict[str, Any]:
+    return {
+        "approved": False,
+        "rejection_reasons": [reason or "invalid_risk_control_review_json"],
+        "risk_flags": ["llm_risk_review_invalid"],
+        "max_allowed_dollars": 0.0,
+        "requires_human_confirmation": True,
+    }
+
+
+def _nested_get(payload: dict[str, Any], *paths: tuple[str, ...]) -> Any:
+    for path in paths:
+        cur: Any = payload
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                cur = None
+                break
+            cur = cur[key]
+        if cur is not None:
+            return cur
+    return None
+
+
+def _add_unique(items: list[str], text: str) -> None:
+    if text and text not in items:
+        items.append(text)
+
+
+def _apply_structural_risk_cautions(
+    result: dict[str, Any],
+    risk_context: dict[str, Any],
+    deterministic_allowed_dollars: float,
+) -> None:
+    action_type = str(_nested_get(
+        risk_context,
+        ("action_type",),
+        ("trade", "action_type"),
+        ("decision", "action_type"),
+    ) or "entry").lower()
+    is_entry = action_type == "entry"
+
+    minutes = _nested_get(
+        risk_context,
+        ("minutes_to_resolution",),
+        ("minutes_to_close",),
+        ("market", "minutes_to_resolution"),
+        ("market", "minutes_to_close"),
+        ("timing", "minutes_to_resolution"),
+        ("timing", "minutes_to_close"),
+    )
+    try:
+        minutes_left = float(minutes)
+    except (TypeError, ValueError):
+        minutes_left = None
+
+    if minutes_left is not None:
+        if minutes_left < 5 and is_entry:
+            result["approved"] = False
+            _add_unique(result["rejection_reasons"], "time_to_resolution_under_5_min")
+            _add_unique(result["risk_flags"], "near_resolution_hard_reject")
+            result["max_allowed_dollars"] = 0.0
+        elif minutes_left < 20 and is_entry:
+            result["approved"] = False
+            _add_unique(result["rejection_reasons"], "time_to_resolution_5_to_20_min_entry")
+            _add_unique(result["risk_flags"], "near_resolution_entry_rejected")
+            result["max_allowed_dollars"] = 0.0
+        elif minutes_left < 60:
+            _add_unique(result["risk_flags"], "near_resolution_strict_review")
+            result["max_allowed_dollars"] = min(
+                result["max_allowed_dollars"],
+                deterministic_allowed_dollars * 0.50,
+            )
+        elif minutes_left > 72 * 60:
+            _add_unique(result["risk_flags"], "long_horizon_requires_supported_category")
+
+    liquidity = _nested_get(
+        risk_context,
+        ("liquidity_dollars",),
+        ("market", "liquidity_dollars"),
+        ("liquidity", "liquidity_dollars"),
+    )
+    min_liquidity = _nested_get(
+        risk_context,
+        ("min_liquidity_dollars",),
+        ("risk_limits", "min_liquidity_dollars"),
+        ("limits", "min_liquidity_dollars"),
+    )
+    min_liquidity = _risk_safe_dollars(min_liquidity, default=0.0)
+    try:
+        liquidity_dollars = float(liquidity)
+    except (TypeError, ValueError):
+        liquidity_dollars = None
+
+    if liquidity_dollars is not None and min_liquidity > 0:
+        if liquidity_dollars < min_liquidity:
+            result["approved"] = False
+            _add_unique(result["rejection_reasons"], "insufficient_liquidity")
+            _add_unique(result["risk_flags"], "illiquid_market")
+            result["max_allowed_dollars"] = 0.0
+        elif liquidity_dollars < min_liquidity * 2:
+            _add_unique(result["risk_flags"], "thin_liquidity")
+            result["requires_human_confirmation"] = True
+
+    corr_exposure = _nested_get(
+        risk_context,
+        ("correlated_exposure",),
+        ("correlated_exposure_dollars",),
+        ("exposure", "correlated_dollars"),
+    )
+    corr_cap = _nested_get(
+        risk_context,
+        ("max_correlated_exposure_dollars",),
+        ("risk_limits", "max_correlated_exposure_dollars"),
+        ("limits", "max_correlated_exposure_dollars"),
+    )
+    corr_cap = _risk_safe_dollars(corr_cap, default=0.0)
+    try:
+        correlated = float(corr_exposure)
+    except (TypeError, ValueError):
+        correlated = None
+
+    if correlated is not None and corr_cap > 0:
+        if correlated > corr_cap:
+            result["approved"] = False
+            _add_unique(result["rejection_reasons"], "correlated_exposure_cap")
+            _add_unique(result["risk_flags"], "correlated_exposure_limit_exceeded")
+            result["max_allowed_dollars"] = 0.0
+        elif correlated >= corr_cap * 0.80:
+            _add_unique(result["risk_flags"], "correlated_exposure_near_cap")
+            result["requires_human_confirmation"] = True
+
+
+def _normalize_risk_control_review(
+    raw: Any,
+    deterministic_assessment: dict[str, Any],
+    risk_context: dict[str, Any],
+    deterministic_allowed_dollars: float,
+) -> dict[str, Any]:
+    cap = _risk_safe_dollars(deterministic_allowed_dollars)
+
+    if not isinstance(raw, dict):
+        result = _risk_review_fallback("invalid_risk_control_review_json")
+    elif not _RISK_REVIEW_KEYS.issubset(raw.keys()):
+        result = _risk_review_fallback("missing_risk_control_review_fields")
+    elif not isinstance(raw.get("approved"), bool) or not isinstance(raw.get("requires_human_confirmation"), bool):
+        result = _risk_review_fallback("invalid_risk_control_review_field_types")
+    else:
+        result = {
+            "approved": bool(raw["approved"]),
+            "rejection_reasons": _risk_string_list(raw.get("rejection_reasons")),
+            "risk_flags": _risk_string_list(raw.get("risk_flags")),
+            "max_allowed_dollars": min(_risk_safe_dollars(raw.get("max_allowed_dollars")), cap),
+            "requires_human_confirmation": bool(raw["requires_human_confirmation"]),
+        }
+
+    deterministic_approved = deterministic_assessment.get("approved") is True
+    if not deterministic_approved:
+        result["approved"] = False
+        result["max_allowed_dollars"] = 0.0
+        _add_unique(result["risk_flags"], "deterministic_risk_rejected")
+        failed = deterministic_assessment.get("checks_failed", [])
+        if not isinstance(failed, list):
+            failed = [str(failed)] if failed else []
+        if failed:
+            for failure in failed:
+                _add_unique(result["rejection_reasons"], str(failure)[:200])
+        else:
+            _add_unique(result["rejection_reasons"], "deterministic_risk_rejected")
+    else:
+        _apply_structural_risk_cautions(result, risk_context, cap)
+        result["max_allowed_dollars"] = min(_risk_safe_dollars(result["max_allowed_dollars"]), cap)
+
+    if result["requires_human_confirmation"] and result["approved"]:
+        result["approved"] = False
+        _add_unique(result["rejection_reasons"], "human_confirmation_required")
+
+    return {key: result[key] for key in (
+        "approved",
+        "rejection_reasons",
+        "risk_flags",
+        "max_allowed_dollars",
+        "requires_human_confirmation",
+    )}
+
+
+def run_risk_control_review(
+    cfg: Config,
+    *,
+    risk_context: dict[str, Any],
+    deterministic_assessment: dict[str, Any] | Any,
+    deterministic_allowed_dollars: float,
+) -> dict[str, Any]:
+    """
+    Ask the LLM for a JSON-only risk-control review, then fail closed.
+
+    This does not place orders and does not import or call trading.py. The
+    deterministic risk assessment remains authoritative: if it rejected the
+    trade, the returned review is rejected even if the LLM says approved.
+    """
+    context = _structured(risk_context)
+    if not isinstance(context, dict):
+        context = {"risk_context": context}
+
+    assessment = _structured(deterministic_assessment)
+    if not isinstance(assessment, dict):
+        assessment = {"approved": False, "checks_failed": ["invalid_deterministic_assessment"]}
+
+    cap = _risk_safe_dollars(deterministic_allowed_dollars)
+    payload = {
+        "risk_context": context,
+        "deterministic_risk_assessment": assessment,
+        "deterministic_allowed_dollars": cap,
+        "review_instruction": (
+            "Add only risk-control caution. Do not seek profit, calculate edge, "
+            "recommend size above the deterministic cap, or override deterministic rejection."
+        ),
+    }
+    user = (
+        "Risk-control review payload JSON:\n"
+        f"{json.dumps(payload, sort_keys=True, default=str)}\n\n"
+        "Return JSON only."
+    )
+
+    try:
+        raw = call_json(cfg, _RISK_CONTROL_REVIEW_SYSTEM, user, max_tokens=700, temperature=0.0)
+    except Exception as exc:
+        logger.error(_MODULE, "risk_control_review_failed", err=str(exc))
+        raw = _risk_review_fallback(f"risk_control_review_failed: {exc}")
+
+    return _normalize_risk_control_review(raw, assessment, context, cap)
+
+
+_PROB_CONFIDENCE_BANDS: list[tuple[float, str]] = [
+    (0.85, "high"),
+    (0.70, "medium-high"),
+    (0.55, "medium"),
+    (0.40, "medium-low"),
+]
+
+
+def _confidence_float_to_label(value: float) -> str:
+    """Map a 0.0–1.0 confidence float to the internal label scale."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "low"
+    v = max(0.0, min(1.0, v))
+    for floor, label in _PROB_CONFIDENCE_BANDS:
+        if v >= floor:
+            return label
+    return "low"
+
+
+def _string_list(value: Any, *, max_items: int = 12, max_len: int = 200) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value[:max_items]:
+        text = str(item).strip()
+        if text:
+            out.append(text[:max_len])
+    return out
+
+
+def _probability_estimator_fallback(p_market: float, reason: str) -> dict[str, Any]:
+    """Safe spec-shaped fallback when the estimator is unavailable or invalid."""
+    p_yes = max(0.01, min(0.99, float(p_market)))
+    p_no = round(1.0 - p_yes, 6)
+    return {
+        "estimated_yes_probability": round(p_yes, 6),
+        "estimated_no_probability":  p_no,
+        "confidence":                0.25,
+        "main_factors":              ["Market-implied probability used as fallback"],
+        "uncertainty_factors":       [reason or "Probability estimator unavailable or returned invalid JSON"],
+        "probability_rationale":     "No reliable estimator output was available, so the system stayed anchored to the market price.",
+        "overconfidence_warning":    True,
+    }
+
+
+def _normalize_probability_estimator_result(raw: Any, p_market: float) -> dict[str, Any]:
+    """
+    Validate and normalize a probability-estimator JSON object.
+
+    Guarantees in the returned dict:
+      - all spec keys are present
+      - estimated_yes_probability is a float in [0.01, 0.99]
+      - estimated_no_probability == 1 - estimated_yes_probability (rounded)
+      - confidence is a float in [0.0, 1.0]
+      - main_factors / uncertainty_factors are list[str]
+      - probability_rationale is a string
+      - overconfidence_warning is a bool
+    """
+    if not isinstance(raw, dict):
+        return _probability_estimator_fallback(p_market, "LLM response was not a JSON object")
+
+    try:
+        yes_raw = float(raw.get("estimated_yes_probability"))
+    except (TypeError, ValueError):
+        return _probability_estimator_fallback(p_market, "estimated_yes_probability missing or non-numeric")
+    p_yes = max(0.01, min(0.99, yes_raw))
+    p_no = round(1.0 - p_yes, 6)
+
+    try:
+        confidence = float(raw.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    rationale = str(raw.get("probability_rationale", "") or "").strip()
+    if not rationale:
+        rationale = "No rationale provided."
+
+    warning = raw.get("overconfidence_warning", True)
+    if not isinstance(warning, bool):
+        warning = bool(warning)
+
+    main_factors = _string_list(raw.get("main_factors"))
+    uncertainty_factors = _string_list(raw.get("uncertainty_factors"))
+
+    # Spec rule: any large move from baseline should carry an overconfidence
+    # warning even if the LLM forgot to set it.
+    if abs(p_yes - max(0.01, min(0.99, float(p_market)))) > 0.10:
+        warning = True
+
+    return {
+        "estimated_yes_probability": round(p_yes, 6),
+        "estimated_no_probability":  p_no,
+        "confidence":                round(confidence, 6),
+        "main_factors":              main_factors,
+        "uncertainty_factors":       uncertainty_factors,
+        "probability_rationale":     rationale[:1000],
+        "overconfidence_warning":    bool(warning),
+    }
+
+
+def run_probability_estimator(
+    cfg: Config,
+    *,
+    ticker: str,
+    title: str,
+    rules: str,
+    market_implied_yes_probability: float,
+    yes_bid: int,
+    yes_ask: int,
+    no_bid: int,
+    no_ask: int,
+    spread_cents: int,
+    liquidity_dollars: float,
+    volume_24h: int,
+    minutes_to_resolution: float,
+    research_summary: str,
+    sentiment_payload: dict[str, Any] | None = None,
+    weird_move_payload: dict[str, Any] | None = None,
+    related_market_context: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Probability calibration wrapper.
+
+    Returns the strict spec-shaped JSON dict (see _PROBABILITY_ESTIMATOR_SYSTEM).
+    Never raises — on any failure, returns the market-anchored fallback dict
+    with confidence=0.25 and overconfidence_warning=True.
+
+    This wrapper does not recommend a trade, calculate edge, suggest a side,
+    place orders, or override risk controls. It only emits a calibrated
+    probability estimate and uncertainty notes.
+    """
+    p_market = max(0.01, min(0.99, float(market_implied_yes_probability)))
+
+    payload = {
+        "ticker": ticker,
+        "title": title,
+        "resolution_rules": rules,
+        "market_implied_yes_probability": round(p_market, 4),
+        "prices_cents": {
+            "yes_bid": yes_bid, "yes_ask": yes_ask,
+            "no_bid":  no_bid,  "no_ask":  no_ask,
+            "spread":  spread_cents,
+        },
+        "liquidity_dollars": liquidity_dollars,
+        "volume_24h": volume_24h,
+        "minutes_to_resolution": minutes_to_resolution,
+        "research_summary": (research_summary or "")[:4000],
+        "sentiment": sentiment_payload or {},
+        "weird_move": weird_move_payload or {},
+        "related_market_context": related_market_context or [],
+    }
+
+    user = (
+        "Probability estimation payload JSON:\n"
+        f"{json.dumps(payload, sort_keys=True, default=str)}\n\n"
+        "Estimate the true YES probability for this market. Anchor to the "
+        "market-implied probability and adjust only when evidence justifies "
+        "it. Return JSON only."
+    )
+
+    try:
+        raw = call_json(cfg, _PROBABILITY_ESTIMATOR_SYSTEM, user, max_tokens=1000)
+    except Exception as exc:
+        logger.error(_MODULE, "probability_estimator_failed",
+                     ticker=ticker, err=str(exc))
+        return _probability_estimator_fallback(
+            p_market, f"Probability estimator call failed: {exc}"
+        )
+
+    return _normalize_probability_estimator_result(raw, p_market)
+
+
 def estimate_probability(
     cfg: Config,
     ticker: str,
@@ -592,22 +1137,141 @@ def estimate_probability(
     research_summary: str,
     sentiment_data: dict[str, Any],
 ) -> dict[str, Any]:
-    user = f"""Market: {ticker}
-Title: {title}
-Resolution criteria: {rules}
-Current YES ask: {yes_ask}¢ (market implies ~{yes_ask}% YES probability)
-Current NO ask: {no_ask}¢
+    """
+    Legacy adapter — internally routes through run_probability_estimator
+    using the new spec prompt, then re-shapes the result into the legacy
+    dict that prediction_model._llm_component consumes.
 
-Research summary:
-{research_summary}
+    Returned dict has the legacy keys:
+      yes_probability        — float 0–1
+      confidence             — label (low | medium-low | medium | medium-high | high)
+      reasoning              — probability_rationale
+      assumptions            — main_factors
+      invalidation_conditions — uncertainty_factors
+    """
+    # Build a coarse market baseline from yes_ask alone (cents → probability).
+    # prediction_model._llm_component re-clamps the result to ±10pp from the
+    # true mid before blending, so this approximation is safe.
+    p_market = max(0.01, min(0.99, yes_ask / 100.0))
+    yes_bid = max(0, 100 - no_ask)
+    spec = run_probability_estimator(
+        cfg,
+        ticker=ticker,
+        title=title,
+        rules=rules,
+        market_implied_yes_probability=p_market,
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
+        no_bid=max(0, 100 - yes_ask),
+        no_ask=no_ask,
+        spread_cents=max(0, yes_ask - yes_bid),
+        liquidity_dollars=0.0,
+        volume_24h=0,
+        minutes_to_resolution=0.0,
+        research_summary=research_summary,
+        sentiment_payload=sentiment_data or {},
+    )
+    return {
+        "yes_probability":         spec["estimated_yes_probability"],
+        "confidence":              _confidence_float_to_label(spec["confidence"]),
+        "reasoning":               spec["probability_rationale"],
+        "assumptions":             list(spec["main_factors"]),
+        "invalidation_conditions": list(spec["uncertainty_factors"]),
+    }
 
-Sentiment signal: {sentiment_data.get('sentiment_score', 0.0):+.3f} (confidence: {sentiment_data.get('confidence', 0.0):.2f})
-Narrative: {sentiment_data.get('narrative_direction', 'neutral')}
-Market impact estimate: {sentiment_data.get('market_impact_cents', 0)}¢
-{("Contradictions: " + "; ".join(sentiment_data.get('contradictions', []))) if sentiment_data.get('contradictions') else ""}
 
-Estimate the true probability this resolves YES."""
-    return call_json(cfg, _PROBABILITY_SYSTEM, user, max_tokens=1000)
+def _normalize_postmortem_rule_changes(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, str):
+            rule = item.strip()
+            reason = "Legacy rule-change proposal from postmortem reviewer."
+            priority = "medium"
+        elif isinstance(item, dict):
+            rule = str(item.get("rule", "")).strip()
+            reason = str(item.get("reason", "")).strip()
+            priority = str(item.get("priority", "medium")).strip().lower()
+        else:
+            continue
+        if not rule or rule.lower() == "none":
+            continue
+        if priority not in {"low", "medium", "high"}:
+            priority = "medium"
+        out.append({
+            "rule": rule[:300],
+            "reason": (reason or "No reason provided by reviewer.")[:500],
+            "priority": priority,
+            "requires_human_approval": True,
+        })
+    return out
+
+
+def _postmortem_missing_evidence(payload: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for key in (
+        "research_summary",
+        "sentiment_result",
+        "probability_estimate",
+        "edge_result",
+        "risk_assessment",
+        "execution_log",
+        "market_structure_notes",
+        "resolution_rules",
+    ):
+        value = payload.get(key)
+        if value in (None, "", {}, []):
+            missing.append(f"Missing {key}")
+    return missing
+
+
+def _normalize_postmortem_result(raw: Any, trade_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raw = {}
+
+    root_causes = _string_list(raw.get("root_causes"), max_items=12, max_len=240)
+    if not root_causes:
+        analysis = str(raw.get("analysis", "")).strip()
+        if analysis:
+            root_causes = [analysis[:240]]
+
+    proposed = _normalize_postmortem_rule_changes(raw.get("proposed_rule_changes"))
+    if not proposed:
+        proposed = _normalize_postmortem_rule_changes(raw.get("rule_changes_proposed"))
+    if not proposed:
+        proposal = str(raw.get("rule_change_proposal", "")).strip()
+        if proposal and proposal.lower() != "none":
+            proposed = _normalize_postmortem_rule_changes([{
+                "rule": proposal,
+                "reason": "Legacy rule_change_proposal field from postmortem reviewer.",
+                "priority": "medium",
+            }])
+
+    missing = _postmortem_missing_evidence(payload)
+    data_quality = _string_list(raw.get("data_quality_issues"), max_items=12, max_len=240)
+    for issue in missing:
+        _add_unique(data_quality, issue)
+
+    output_trade_id = str(raw.get("trade_id") or trade_id)
+    if output_trade_id != trade_id:
+        _add_unique(root_causes, "LLM postmortem trade_id did not match input trade_id")
+        output_trade_id = trade_id
+
+    should_update = bool(raw.get("should_update_rules_file", False)) and bool(proposed)
+
+    return {
+        "trade_id": output_trade_id,
+        "good_process_bad_outcome": bool(raw.get("good_process_bad_outcome", raw.get("was_variance", False))),
+        "root_causes": root_causes or ["Loss requires human review; evidence was insufficient for a specific cause."],
+        "data_quality_issues": data_quality,
+        "reasoning_issues": _string_list(raw.get("reasoning_issues"), max_items=12, max_len=240),
+        "risk_issues": _string_list(raw.get("risk_issues"), max_items=12, max_len=240),
+        "execution_issues": _string_list(raw.get("execution_issues"), max_items=12, max_len=240),
+        "market_structure_issues": _string_list(raw.get("market_structure_issues"), max_items=12, max_len=240),
+        "proposed_rule_changes": proposed,
+        "should_update_rules_file": should_update,
+    }
 
 
 def run_postmortem(
@@ -618,13 +1282,50 @@ def run_postmortem(
     estimated_yes_prob: float,
     entry_price_cents: int,
     actual_result: str,
+    *,
+    trade_id: str = "",
+    side: str = "",
+    contracts: int = 0,
+    exit_price_cents: int = 0,
+    pnl_dollars: float = 0.0,
+    result: str = "loss",
+    research_summary: str = "",
+    sentiment_result: dict[str, Any] | None = None,
+    probability_estimate: dict[str, Any] | None = None,
+    edge_result: dict[str, Any] | None = None,
+    risk_assessment: dict[str, Any] | None = None,
+    execution_log: dict[str, Any] | None = None,
+    market_structure_notes: dict[str, Any] | None = None,
+    time_to_resolution_at_entry_minutes: float = 0.0,
+    resolution_rules: str = "",
 ) -> dict[str, Any]:
-    user = f"""Trade postmortem:
-Market: {ticker} — {title}
-Original thesis: {original_thesis}
-Estimated YES probability at entry: {estimated_yes_prob:.1%}
-Entry price (YES): {entry_price_cents}¢ (implied market probability: ~{entry_price_cents}%)
-Actual result: {actual_result}
-
-Analyze this trade."""
-    return call_json(cfg, _POSTMORTEM_SYSTEM, user, max_tokens=1200)
+    payload = {
+        "trade_id": trade_id,
+        "ticker": ticker,
+        "side": side,
+        "contracts": contracts,
+        "entry_price_cents": entry_price_cents,
+        "exit_price_cents": exit_price_cents,
+        "pnl_dollars": pnl_dollars,
+        "result": result,
+        "original_thesis": original_thesis,
+        "estimated_yes_probability": estimated_yes_prob,
+        "market_price_at_entry": entry_price_cents,
+        "actual_result": actual_result,
+        "research_summary": research_summary,
+        "sentiment_result": sentiment_result or {},
+        "probability_estimate": probability_estimate or {},
+        "edge_result": edge_result or {},
+        "risk_assessment": risk_assessment or {},
+        "execution_log": execution_log or {},
+        "market_structure_notes": market_structure_notes or {},
+        "time_to_resolution_at_entry_minutes": time_to_resolution_at_entry_minutes,
+        "resolution_rules": resolution_rules,
+    }
+    user = (
+        "Postmortem payload JSON:\n"
+        f"{json.dumps(payload, sort_keys=True, default=str)}\n\n"
+        "Review only this losing trade. Return JSON only."
+    )
+    raw = call_json(cfg, _POSTMORTEM_SYSTEM, user, max_tokens=1800, temperature=0.0)
+    return _normalize_postmortem_result(raw, trade_id, payload)

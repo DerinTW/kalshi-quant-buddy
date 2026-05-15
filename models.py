@@ -1,7 +1,35 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
+
+
+# ── Module-level JSON helpers (shared by to_dict() methods below) ────────────
+
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    """Datetime → ISO 8601 string, None passes through. JSON-safe."""
+    if value is None:
+        return None
+    try:
+        return value.isoformat()
+    except Exception:
+        return None
+
+
+def _str_list(value: Any) -> list[str]:
+    """Coerce to a list of strings — used for risk-summary / monitoring lists."""
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None]
+
+
+def _clamp01(value: float, default: float = 0.0) -> float:
+    """Clamp probability/credibility/relevance/recency to [0.0, 1.0]."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, v))
 
 
 @dataclass
@@ -39,6 +67,48 @@ class Market:
     # total contracts available at the best ask/bid — set by enrich_with_orderbook_depth()
     orderbook_depth: int = 0
 
+    # ── Step 18 blueprint compatibility ──────────────────────────────────
+    @property
+    def time_to_resolution_minutes(self) -> float:
+        """Blueprint alias — mirrors minutes_to_settlement (existing field)."""
+        return self.minutes_to_settlement
+
+    @property
+    def mid_price_cents(self) -> float:
+        """Midpoint of best bid/ask in cents; falls back to yes_ask alone."""
+        if self.yes_bid > 0 and self.yes_ask > 0:
+            return (self.yes_ask + self.yes_bid) / 2.0
+        return float(self.yes_ask or 0)
+
+    def to_dict(self) -> dict:
+        """JSON-safe dict — datetimes become ISO strings."""
+        return {
+            "ticker":                self.ticker,
+            "title":                 self.title,
+            "status":                self.status,
+            "yes_ask":               self.yes_ask,
+            "yes_bid":               self.yes_bid,
+            "no_ask":                self.no_ask,
+            "no_bid":                self.no_bid,
+            "volume":                self.volume,
+            "volume_24h":            self.volume_24h,
+            "open_interest":         self.open_interest,
+            "close_time":            _iso(self.close_time),
+            "settlement_time":       _iso(self.settlement_time),
+            "category":              self.category,
+            "rules_primary":         self.rules_primary,
+            "result":                self.result,
+            "spread_pct":            self.spread_pct,
+            "minutes_to_close":      self.minutes_to_close,
+            "minutes_to_settlement": self.minutes_to_settlement,
+            "liquidity_dollars":     self.liquidity_dollars,
+            "is_unsafe":             self.is_unsafe,
+            "unsafe_reason":         self.unsafe_reason,
+            "event_ticker":          self.event_ticker,
+            "last_trade_at":         _iso(self.last_trade_at),
+            "orderbook_depth":       self.orderbook_depth,
+        }
+
 
 @dataclass
 class Orderbook:
@@ -74,6 +144,22 @@ class WeirdMoveSignal:
     confidence: str          # high | medium | low
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
+    def to_dict(self) -> dict:
+        return {
+            "ticker":               self.ticker,
+            "flagged":              bool(self.flagged),
+            "classification":       self.classification,
+            "price_change_5m":      round(float(self.price_change_5m), 4),
+            "price_change_15m":     round(float(self.price_change_15m), 4),
+            "volume_ratio":         round(float(self.volume_ratio), 4),
+            "spread_change":        round(float(self.spread_change), 4),
+            "related_disagreement": round(float(self.related_disagreement), 4),
+            "triggers":             _str_list(self.triggers),
+            "description":          self.description,
+            "confidence":           self.confidence,
+            "timestamp":            _iso(self.timestamp),
+        }
+
 
 @dataclass
 class ResearchItem:
@@ -88,6 +174,21 @@ class ResearchItem:
     recency_score: float           # 0.0–1.0 — decays with age
     summary: str                   # 2–3 sentence context
     agent: str = ""                # which research agent found this
+
+    def to_dict(self) -> dict:
+        """JSON-safe dict — datetimes become ISO strings."""
+        return {
+            "source":        self.source,
+            "url":           self.url,
+            "published_at":  _iso(self.published_at),
+            "claim":         self.claim,
+            "direction":     self.direction,
+            "relevance":     round(_clamp01(self.relevance), 4),
+            "credibility":   round(_clamp01(self.credibility), 4),
+            "recency_score": round(_clamp01(self.recency_score), 4),
+            "summary":       self.summary,
+            "agent":         self.agent,
+        }
 
 
 @dataclass
@@ -187,6 +288,16 @@ class ResearchResult:
                 out.append(item.source)
         return out
 
+    def to_dict(self) -> dict:
+        """JSON-safe dict including items as nested dicts."""
+        return {
+            "ticker":        self.ticker,
+            "query":         self.query,
+            "items":         [item.to_dict() for item in self.items],
+            "failed_reason": self.failed_reason,
+            "timestamp":     _iso(self.timestamp),
+        }
+
 
 @dataclass
 class SentimentResult:
@@ -219,6 +330,23 @@ class SentimentResult:
             "market_impact_estimate_cents": int(self.market_impact_estimate_cents),
             "confidence":                   round(self.confidence, 4),
             "contradictions":               list(self.major_contradictions),
+            "rumor_risk":                   self.rumor_risk,
+        }
+
+    def to_dict(self) -> dict:
+        """Full JSON-safe dict including ticker + timestamp + spec fields."""
+        return {
+            "ticker":                       self.ticker,
+            "sentiment_score":              round(self.sentiment_score, 4),
+            "narrative_direction":          self.narrative_direction,
+            "confidence":                   round(_clamp01(self.confidence), 4),
+            "market_impact_estimate_cents": int(self.market_impact_estimate_cents),
+            "major_contradictions":         list(self.major_contradictions),
+            "item_count":                   int(self.item_count),
+            "contributing_sources":         list(self.contributing_sources),
+            "timestamp":                    _iso(self.timestamp),
+            "source_credibility":           round(_clamp01(self.source_credibility), 4),
+            "event_relevance":              round(_clamp01(self.event_relevance), 4),
             "rumor_risk":                   self.rumor_risk,
         }
 
@@ -293,6 +421,23 @@ class ProbabilityEstimate:
     invalidation_conditions: list[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
+    @property
+    def no_probability(self) -> float:
+        """Derived NO probability — always 1 - yes_probability."""
+        return round(1.0 - _clamp01(self.yes_probability), 6)
+
+    def to_dict(self) -> dict:
+        return {
+            "ticker":                  self.ticker,
+            "yes_probability":         round(_clamp01(self.yes_probability), 6),
+            "no_probability":          self.no_probability,
+            "confidence":              self.confidence,
+            "reasoning":               self.reasoning,
+            "assumptions":             _str_list(self.assumptions),
+            "invalidation_conditions": _str_list(self.invalidation_conditions),
+            "timestamp":               _iso(self.timestamp),
+        }
+
 
 @dataclass
 class EdgeResult:
@@ -324,6 +469,23 @@ class EdgeResult:
     confidence_adjusted_edge_pct: float = 0.0    # adjusted_edge_pct * confidence_weight (pp)
     spread_cents: int = 0           # spread of the entry side
 
+    def to_dict(self) -> dict:
+        return {
+            "ticker":                       self.ticker,
+            "side":                         self.side,
+            "entry_price_cents":            int(self.entry_price_cents),
+            "implied_yes_prob":             round(_clamp01(self.implied_yes_prob), 6),
+            "estimated_yes_prob":           round(_clamp01(self.estimated_yes_prob), 6),
+            "raw_edge_pct":                 round(self.raw_edge_pct, 4),
+            "adjusted_edge_pct":            round(self.adjusted_edge_pct, 4),
+            "expected_value":               round(self.expected_value, 6),
+            "adjusted_ev":                  round(self.adjusted_ev, 6),
+            "confidence":                   self.confidence,
+            "confidence_adjusted_ev":       round(self.confidence_adjusted_ev, 6),
+            "confidence_adjusted_edge_pct": round(self.confidence_adjusted_edge_pct, 4),
+            "spread_cents":                 int(self.spread_cents),
+        }
+
 
 @dataclass
 class RiskDecision:
@@ -345,6 +507,23 @@ class RiskAssessment:
     checks_failed: list[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
+    @property
+    def rejection_reasons(self) -> list[str]:
+        """Blueprint alias — list of failed checks for rejected assessments."""
+        return list(self.checks_failed) if not self.approved else []
+
+    def to_dict(self) -> dict:
+        return {
+            "ticker":          self.ticker,
+            "side":            self.side,
+            "approved":        bool(self.approved),
+            "reason":          self.reason,
+            "mode":            self.mode,
+            "checks_passed":   _str_list(self.checks_passed),
+            "checks_failed":   _str_list(self.checks_failed),
+            "timestamp":       _iso(self.timestamp),
+        }
+
 
 @dataclass
 class PositionSize:
@@ -354,6 +533,16 @@ class PositionSize:
     contracts: int
     entry_price_cents: int
     max_loss_dollars: float
+
+    def to_dict(self) -> dict:
+        return {
+            "ticker":            self.ticker,
+            "side":              self.side,
+            "dollars":           round(float(self.dollars), 2),
+            "contracts":         int(self.contracts),
+            "entry_price_cents": int(self.entry_price_cents),
+            "max_loss_dollars":  round(float(self.max_loss_dollars), 2),
+        }
 
 
 @dataclass
@@ -373,6 +562,141 @@ class TradeRecord:
     pnl_dollars: Optional[float] = None
     result: Optional[str] = None     # win | loss | push | open
 
+    def to_dict(self) -> dict:
+        return {
+            "id":                self.id,
+            "ticker":            self.ticker,
+            "side":              self.side,
+            "contracts":         int(self.contracts),
+            "entry_price_cents": int(self.entry_price_cents),
+            "dollars_at_risk":   round(float(self.dollars_at_risk), 2),
+            "mode":              self.mode,
+            "thesis":            self.thesis,
+            "estimated_yes_prob": round(_clamp01(self.estimated_yes_prob), 6),
+            "timestamp":         _iso(self.timestamp),
+            "exit_price_cents":  self.exit_price_cents,
+            "exit_timestamp":    _iso(self.exit_timestamp),
+            "pnl_dollars":       (round(float(self.pnl_dollars), 2)
+                                  if self.pnl_dollars is not None else None),
+            "result":            self.result,
+        }
+
+
+# ── Step 18 blueprint: TradeDecision ─────────────────────────────────────────
+# This mirrors the dict returned by decision_formatter.format_decision().
+# We keep the formatter returning a plain dict (existing contract) and offer
+# this dataclass for callers who want a typed handle. from_dict() / to_dict()
+# round-trip cleanly with the formatter's output.
+
+@dataclass
+class TradeDecision:
+    """
+    Final trade-decision record. Produced by decision_formatter; consumed by
+    logging/storage and downstream review. Does not place orders.
+
+    `action` is one of: BUY_YES | BUY_NO | NO_TRADE | EXIT | HOLD.
+    `side`   is one of: "yes" | "no" | None (None for NO_TRADE / HOLD).
+    """
+    action: str
+    ticker: str
+    side: Optional[str] = None
+    limit_price_cents: int = 0
+    contracts: int = 0
+    dollar_size: float = 0.0
+    thesis: str = ""
+    edge_cents: float = 0.0
+    confidence: float = 0.0     # numeric 0.0–1.0
+    risk_summary: str = ""
+    monitoring_plan: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TradeDecision":
+        """Construct from the dict returned by decision_formatter.format_decision()."""
+        return cls(
+            action=str(data.get("action", "NO_TRADE")),
+            ticker=str(data.get("ticker", "")),
+            side=(str(data["side"]) if data.get("side") is not None else None),
+            limit_price_cents=int(data.get("limit_price_cents", 0) or 0),
+            contracts=int(data.get("contracts", 0) or 0),
+            dollar_size=float(data.get("dollar_size", 0.0) or 0.0),
+            thesis=str(data.get("thesis", "") or ""),
+            edge_cents=float(data.get("edge_cents", 0.0) or 0.0),
+            confidence=_clamp01(data.get("confidence", 0.0)),
+            risk_summary=str(data.get("risk_summary", "") or ""),
+            monitoring_plan=_str_list(data.get("monitoring_plan")),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "action":            self.action,
+            "ticker":            self.ticker,
+            "side":              self.side,
+            "limit_price_cents": int(self.limit_price_cents),
+            "contracts":         int(self.contracts),
+            "dollar_size":       round(float(self.dollar_size), 2),
+            "thesis":            self.thesis,
+            "edge_cents":        round(float(self.edge_cents), 4),
+            "confidence":        round(_clamp01(self.confidence), 4),
+            "risk_summary":      self.risk_summary,
+            "monitoring_plan":   _str_list(self.monitoring_plan),
+        }
+
+    @property
+    def is_trade(self) -> bool:
+        return self.action in ("BUY_YES", "BUY_NO")
+
+
+# ── Step 18 blueprint: ExecutionReport ───────────────────────────────────────
+# trading.py currently returns a TradeRecord; this dataclass is the structured
+# equivalent of the per-order log payload that trading.py also emits (mode,
+# trade_id, ticker, side, contracts, entry/limit prices, status, fills,
+# remaining, order_id, error). It exists so future code can hand back a typed
+# execution result without changing trading.py's current contract.
+
+@dataclass
+class ExecutionReport:
+    ticker: str
+    mode: str                                  # dry_run | paper | live
+    status: str                                # SUBMITTED | OPEN | FILLED | PARTIAL
+                                               # | CANCELLED | FAILED | DRY_RUN
+    trade_id: str = ""                         # internal id (matches TradeRecord.id)
+    side: str = ""                             # YES | NO
+    contracts_requested: int = 0
+    contracts_filled: int = 0
+    contracts_remaining: int = 0
+    limit_price_cents: int = 0
+    avg_fill_price_cents: Optional[int] = None
+    dollars_at_risk: float = 0.0
+    order_id: Optional[str] = None             # broker-assigned id (live only)
+    client_order_id: Optional[str] = None
+    placed: bool = False                       # True if any order was actually placed
+    error: str = ""                            # populated on FAILED
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status in ("FILLED", "PARTIAL", "OPEN", "DRY_RUN") and not self.error
+
+    def to_dict(self) -> dict:
+        return {
+            "ticker":               self.ticker,
+            "mode":                 self.mode,
+            "status":               self.status,
+            "trade_id":             self.trade_id,
+            "side":                 self.side,
+            "contracts_requested":  int(self.contracts_requested),
+            "contracts_filled":     int(self.contracts_filled),
+            "contracts_remaining":  int(self.contracts_remaining),
+            "limit_price_cents":    int(self.limit_price_cents),
+            "avg_fill_price_cents": self.avg_fill_price_cents,
+            "dollars_at_risk":      round(float(self.dollars_at_risk), 2),
+            "order_id":             self.order_id,
+            "client_order_id":      self.client_order_id,
+            "placed":               bool(self.placed),
+            "error":                self.error,
+            "timestamp":            _iso(self.timestamp),
+        }
+
 
 @dataclass
 class Postmortem:
@@ -391,3 +715,33 @@ class Postmortem:
     rule_change_proposal: str
     human_approved: bool = False
     timestamp: datetime = field(default_factory=datetime.utcnow)
+
+    @property
+    def proposed_rule_change(self) -> str:
+        """Blueprint alias — rule changes are proposals only, never auto-applied."""
+        return self.rule_change_proposal
+
+    def to_dict(self) -> dict:
+        return {
+            "trade_id":                    self.trade_id,
+            "ticker":                      self.ticker,
+            "original_thesis":             self.original_thesis,
+            "estimated_yes_prob":          round(_clamp01(self.estimated_yes_prob), 6),
+            "market_price_at_entry":       int(self.market_price_at_entry),
+            "actual_result":               self.actual_result,
+            "was_variance":                bool(self.was_variance),
+            "data_was_stale":              bool(self.data_was_stale),
+            "resolution_handled_correctly": bool(self.resolution_handled_correctly),
+            "liquidity_hurt":              bool(self.liquidity_hurt),
+            "sizing_appropriate":          bool(self.sizing_appropriate),
+            "analysis":                    self.analysis,
+            "rule_change_proposal":        self.rule_change_proposal,
+            "human_approved":              bool(self.human_approved),
+            "timestamp":                   _iso(self.timestamp),
+        }
+
+
+# Step 18 blueprint alias — the blueprint refers to "PostmortemReport".
+# Code in the project uses "Postmortem"; expose both names so either import
+# style works without renaming a stable on-disk dataclass.
+PostmortemReport = Postmortem

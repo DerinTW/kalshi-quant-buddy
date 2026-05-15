@@ -71,6 +71,16 @@ def _build_report(trade: TradeRecord, cfg: Config) -> dict[str, Any]:
                 trade.estimated_yes_prob,
                 trade.entry_price_cents,
                 _actual_outcome(trade),
+                trade_id=trade.id,
+                side=trade.side,
+                contracts=trade.contracts,
+                exit_price_cents=trade.exit_price_cents or 0,
+                pnl_dollars=float(trade.pnl_dollars or 0.0),
+                result=trade.result or "loss",
+                execution_log={
+                    "mode": trade.mode,
+                    "dollars_at_risk": trade.dollars_at_risk,
+                },
             )
         except Exception as exc:
             logger.warn(_MODULE, "postmortem_failed", ticker=trade.ticker, trade_id=trade.id, err=str(exc))
@@ -123,15 +133,28 @@ def _normalize_report(trade: TradeRecord, cfg: Config, raw: dict[str, Any]) -> d
     root_causes = _as_str_list(raw.get("root_causes"))
     if not root_causes:
         root_causes = _root_causes_from_legacy(raw)
-    rule_changes = _normalize_rule_changes(raw.get("rule_changes_proposed"))
+    rule_changes = _normalize_rule_changes(raw.get("proposed_rule_changes"))
+    if not rule_changes:
+        rule_changes = _normalize_rule_changes(raw.get("rule_changes_proposed"))
     if not rule_changes:
         proposal = str(raw.get("rule_change_proposal", "")).strip()
         if proposal and proposal.lower() != "none":
-            rule_changes = [{"rule": proposal, "priority": "medium", "requires_human_approval": True}]
-    if not rule_changes:
+            rule_changes = [{
+                "rule": proposal,
+                "reason": "Legacy rule_change_proposal field from postmortem reviewer.",
+                "priority": "medium",
+                "requires_human_approval": True,
+            }]
+    if (
+        not rule_changes
+        and "proposed_rule_changes" not in raw
+        and "rule_changes_proposed" not in raw
+        and "rule_change_proposal" not in raw
+    ):
         rule_changes = _fallback_report(trade, cfg)["rule_changes_proposed"]
 
     analysis = str(raw.get("analysis") or _fallback_analysis(trade, root_causes))
+    should_update_rules_file = bool(raw.get("should_update_rules_file", False)) and bool(rule_changes)
     return {
         "trade_id": trade.id,
         "ticker": trade.ticker,
@@ -139,9 +162,15 @@ def _normalize_report(trade: TradeRecord, cfg: Config, raw: dict[str, Any]) -> d
         "actual_outcome": str(raw.get("actual_outcome") or _actual_outcome(trade)),
         "loss_amount": abs(float(trade.pnl_dollars or 0.0)),
         "root_causes": root_causes,
+        "data_quality_issues": _as_str_list(raw.get("data_quality_issues")),
+        "reasoning_issues": _as_str_list(raw.get("reasoning_issues")),
+        "risk_issues": _as_str_list(raw.get("risk_issues")),
+        "execution_issues": _as_str_list(raw.get("execution_issues")),
+        "market_structure_issues": _as_str_list(raw.get("market_structure_issues")),
         "good_process_bad_outcome": bool(raw.get("good_process_bad_outcome", raw.get("was_variance", False))),
+        "proposed_rule_changes": rule_changes,
         "rule_changes_proposed": rule_changes,
-        "should_update_rules_file": bool(raw.get("should_update_rules_file", True)),
+        "should_update_rules_file": should_update_rules_file,
         "was_variance": bool(raw.get("was_variance", False)),
         "data_was_stale": bool(raw.get("data_was_stale", False)),
         "resolution_handled_correctly": bool(raw.get("resolution_handled_correctly", True)),
@@ -219,15 +248,24 @@ def _normalize_rule_changes(value: Any) -> list[dict[str, Any]]:
     for item in value:
         if isinstance(item, str):
             rule = item.strip()
+            reason = "Legacy rule-change proposal from postmortem reviewer."
             priority = "medium"
         elif isinstance(item, dict):
             rule = str(item.get("rule", "")).strip()
+            reason = str(item.get("reason", "")).strip()
             priority = str(item.get("priority", "medium")).strip() or "medium"
         else:
             continue
         if not rule or rule.lower() == "none":
             continue
-        out.append({"rule": rule, "priority": priority, "requires_human_approval": True})
+        if priority not in {"low", "medium", "high"}:
+            priority = "medium"
+        out.append({
+            "rule": rule,
+            "reason": reason or "No reason provided by reviewer.",
+            "priority": priority,
+            "requires_human_approval": True,
+        })
     return out
 
 

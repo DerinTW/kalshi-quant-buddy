@@ -101,6 +101,188 @@ def test_postmortem_fallback_when_llm_fails(monkeypatch, tmp_path):
     assert inserted == [pm]
 
 
+def test_losing_trade_uses_structured_postmortem_json(monkeypatch, tmp_path):
+    inserted = []
+    captured = {}
+    monkeypatch.setattr(postmortem.db, "postmortem_exists", lambda trade_id: False)
+    monkeypatch.setattr(postmortem.db, "insert_postmortem", lambda pm: inserted.append(pm))
+
+    def fake_run_postmortem(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "trade_id": kwargs["trade_id"],
+            "good_process_bad_outcome": False,
+            "root_causes": ["Ignored contradictory official data"],
+            "data_quality_issues": ["Contradictory source timestamps"],
+            "reasoning_issues": ["Overweighted social-media move"],
+            "risk_issues": ["Edge discipline was weak"],
+            "execution_issues": [],
+            "market_structure_issues": ["Thin book"],
+            "proposed_rule_changes": [
+                {
+                    "rule": "Require official-source confirmation before this category",
+                    "reason": "The loss came from unverified social signal.",
+                    "priority": "high",
+                    "requires_human_approval": False,
+                }
+            ],
+            "should_update_rules_file": True,
+        }
+
+    monkeypatch.setattr(postmortem.llm, "run_postmortem", fake_run_postmortem)
+
+    pm = postmortem.run_for_trade(
+        closed_trade(),
+        cfg=cfg(anthropic_api_key="x"),
+        pending_rules_path=tmp_path / "rules_pending_review.json",
+    )
+
+    assert pm is not None
+    assert captured["trade_id"] == "pm-trade-1"
+    analysis = json.loads(pm.analysis)
+    assert analysis["root_causes"] == ["Ignored contradictory official data"]
+    proposals = json.loads(pm.rule_change_proposal)
+    assert proposals[0]["requires_human_approval"] is True
+
+
+def test_llm_postmortem_returns_new_json_schema(monkeypatch):
+    captured = {}
+
+    def fake_call_json(c, system, user, *, max_tokens=0, temperature=0.0):
+        captured["system"] = system
+        captured["user"] = user
+        captured["max_tokens"] = max_tokens
+        captured["temperature"] = temperature
+        return {
+            "trade_id": "pm-trade-1",
+            "good_process_bad_outcome": True,
+            "root_causes": ["Correctly sized trade resolved against thesis"],
+            "data_quality_issues": [],
+            "reasoning_issues": [],
+            "risk_issues": [],
+            "execution_issues": [],
+            "market_structure_issues": [],
+            "proposed_rule_changes": [],
+            "should_update_rules_file": False,
+        }
+
+    monkeypatch.setattr(postmortem.llm, "call_json", fake_call_json)
+
+    out = postmortem.llm.run_postmortem(
+        cfg(anthropic_api_key="x"),
+        "KXPM-TEST",
+        "KXPM-TEST",
+        "Good process thesis",
+        0.62,
+        40,
+        "NO",
+        trade_id="pm-trade-1",
+        side="YES",
+        contracts=10,
+        exit_price_cents=0,
+        pnl_dollars=-4.0,
+        result="loss",
+        research_summary="Official source was mixed.",
+        sentiment_result={"narrative_direction": "mixed"},
+        probability_estimate={"confidence": "medium-high"},
+        edge_result={"adjusted_edge_pct": 6.0},
+        risk_assessment={"approved": True},
+        execution_log={"fill": "complete"},
+        market_structure_notes={"spread_cents": 2},
+        time_to_resolution_at_entry_minutes=120,
+        resolution_rules="Official source resolves the market.",
+    )
+
+    assert set(out) == {
+        "trade_id",
+        "good_process_bad_outcome",
+        "root_causes",
+        "data_quality_issues",
+        "reasoning_issues",
+        "risk_issues",
+        "execution_issues",
+        "market_structure_issues",
+        "proposed_rule_changes",
+        "should_update_rules_file",
+    }
+    assert out["trade_id"] == "pm-trade-1"
+    assert out["good_process_bad_outcome"] is True
+    assert out["should_update_rules_file"] is False
+    assert captured["temperature"] == 0.0
+    assert captured["max_tokens"] == 1800
+    assert "Return only valid JSON" in captured["system"]
+    assert "Do not edit live rules, config, .env, or execution settings" in captured["system"]
+    assert "Postmortem payload JSON:" in captured["user"]
+
+
+def test_missing_evidence_is_marked_not_invented(monkeypatch):
+    monkeypatch.setattr(
+        postmortem.llm,
+        "call_json",
+        lambda *a, **kw: {
+            "trade_id": "pm-trade-1",
+            "good_process_bad_outcome": False,
+            "root_causes": [],
+            "data_quality_issues": [],
+            "reasoning_issues": [],
+            "risk_issues": [],
+            "execution_issues": [],
+            "market_structure_issues": [],
+            "proposed_rule_changes": [],
+            "should_update_rules_file": False,
+        },
+    )
+
+    out = postmortem.llm.run_postmortem(
+        cfg(anthropic_api_key="x"),
+        "KXPM-TEST",
+        "KXPM-TEST",
+        "",
+        0.0,
+        40,
+        "UNKNOWN_EXIT",
+        trade_id="pm-trade-1",
+    )
+
+    assert any(issue.startswith("Missing ") for issue in out["data_quality_issues"])
+    assert out["proposed_rule_changes"] == []
+    assert out["should_update_rules_file"] is False
+
+
+def test_good_process_bad_outcome_can_be_true_for_loss(monkeypatch, tmp_path):
+    inserted = []
+    monkeypatch.setattr(postmortem.db, "postmortem_exists", lambda trade_id: False)
+    monkeypatch.setattr(postmortem.db, "insert_postmortem", lambda pm: inserted.append(pm))
+    monkeypatch.setattr(
+        postmortem.llm,
+        "run_postmortem",
+        lambda *a, **kw: {
+            "trade_id": kw["trade_id"],
+            "good_process_bad_outcome": True,
+            "root_causes": ["Variance after correctly sized entry"],
+            "data_quality_issues": [],
+            "reasoning_issues": [],
+            "risk_issues": [],
+            "execution_issues": [],
+            "market_structure_issues": [],
+            "proposed_rule_changes": [],
+            "should_update_rules_file": False,
+        },
+    )
+
+    pm = postmortem.run_for_trade(
+        closed_trade(result="loss"),
+        cfg=cfg(anthropic_api_key="x"),
+        pending_rules_path=tmp_path / "rules_pending_review.json",
+    )
+
+    assert pm is not None
+    analysis = json.loads(pm.analysis)
+    assert analysis["good_process_bad_outcome"] is True
+    assert pm.was_variance is False
+    assert not (tmp_path / "rules_pending_review.json").exists()
+
+
 def test_postmortem_written_to_db(tmp_path):
     old_path = db._db_path
     try:

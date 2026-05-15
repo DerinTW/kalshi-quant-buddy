@@ -1,0 +1,30 @@
+# Secrets
+.env
+*.pem
+*.key
+*.crt
+*.p12
+
+# Local database / logs
+*.db
+black_gibbie.db
+logs/
+*.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual env
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.vscode/
+
+.claude/
+*.local.json

@@ -285,3 +285,52 @@ def test_neutral_when_signal_too_weak():
     r = sentiment.analyze(make_market(), research_with(items))
     assert r.narrative_direction == "neutral"
     assert abs(r.sentiment_score) < 0.05
+
+
+# ── Spec guardrails: sentiment must NOT make trade recommendations ───────────
+
+_FORBIDDEN_TRADE_KEYS = {
+    "recommendation", "recommended_side", "side", "buy", "sell",
+    "buy_yes", "buy_no", "action", "trade", "trade_recommendation",
+    "edge", "edge_cents", "fair_price", "fair_value",
+    "position_size", "contracts", "size", "stake",
+    "probability", "prob_yes", "prob_no", "p_yes", "p_no",
+}
+
+
+def test_spec_dict_has_no_trade_recommendation_fields():
+    items = [
+        item(source="Reuters", credibility=0.85, direction="supports_yes"),
+        item(source="reddit",  credibility=0.40, direction="supports_no"),
+    ]
+    r = sentiment.analyze(make_market(), research_with(items))
+    d = r.to_spec_dict()
+    leaks = set(d.keys()) & _FORBIDDEN_TRADE_KEYS
+    assert not leaks, f"sentiment spec dict leaked trade fields: {leaks}"
+
+
+def test_sentiment_result_has_no_trade_recommendation_fields():
+    """Even on the dataclass itself — no side/edge/size/probability fields."""
+    items = [item(source="Reuters", credibility=0.85, direction="supports_yes")]
+    r = sentiment.analyze(make_market(), research_with(items))
+    public_attrs = {a for a in vars(r).keys() if not a.startswith("_")}
+    leaks = public_attrs & _FORBIDDEN_TRADE_KEYS
+    assert not leaks, f"SentimentResult leaked trade fields: {leaks}"
+
+
+def test_stale_evidence_lowers_confidence_vs_fresh():
+    """Same one-sided official signal — stale recency yields lower confidence."""
+    fresh = [
+        item(source="Reuters",   credibility=0.85, direction="supports_yes", recency=1.0),
+        item(source="Bloomberg", credibility=0.85, direction="supports_yes", recency=1.0),
+    ]
+    stale = [
+        item(source="Reuters",   credibility=0.85, direction="supports_yes", recency=0.30),
+        item(source="Bloomberg", credibility=0.85, direction="supports_yes", recency=0.30),
+    ]
+    r_fresh = sentiment.analyze(make_market(), research_with(fresh))
+    r_stale = sentiment.analyze(make_market(), research_with(stale))
+    # Stale evidence carries less aggregate weight → lower derived impact.
+    assert r_stale.market_impact_estimate_cents <= r_fresh.market_impact_estimate_cents
+    # And the absolute sentiment score should not exceed the fresh version.
+    assert abs(r_stale.sentiment_score) <= abs(r_fresh.sentiment_score) + 1e-9

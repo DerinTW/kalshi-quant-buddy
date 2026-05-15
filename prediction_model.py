@@ -167,6 +167,9 @@ def _estimate_impl(
     confidence = _apply_microstructure_stepdowns(market, confidence)
     confidence = _apply_feature_stepdowns(fv, p_model, market, confidence)
     confidence = _apply_weird_move_stepdowns(weird_move, confidence, market.ticker)
+    confidence = _apply_sentiment_research_stepdowns(
+        sentiment, research, confidence, market.ticker
+    )
 
     result = ProbabilityEstimate(
         ticker=market.ticker,
@@ -306,6 +309,48 @@ def _apply_feature_stepdowns(
                          disagreement=f"{disagreement:.2f}",
                          neighbor_mean=f"{neighbor_mean:.2f}",
                          p_model=f"{p_model:.2f}")
+    return confidence
+
+
+def _apply_sentiment_research_stepdowns(
+    sentiment: Optional[SentimentResult],
+    research: Optional[ResearchResult],
+    confidence: str,
+    ticker: str,
+) -> str:
+    """
+    Step down confidence based on signals the probability-estimator spec
+    treats as uncertainty: rumor risk, contradictions, social-only signal,
+    and missing/empty research.
+    """
+    # Missing or empty research evidence — keyed off the sentiment aggregate
+    # (which already summarises the typed research evidence). Sentiment is the
+    # canonical evidence carrier; raw ResearchResult.items can be empty in
+    # callers that pre-aggregate, so the sentiment view is the right signal.
+    if sentiment is None:
+        confidence = _step_down(confidence)
+        logger.debug(_MODULE, "missing_sentiment_stepdown", ticker=ticker)
+        return confidence
+
+    if getattr(sentiment, "item_count", 0) == 0:
+        confidence = _step_down(confidence)
+        logger.debug(_MODULE, "missing_research_stepdown", ticker=ticker)
+
+    # Rumor risk medium/high — social/unverified signal cannot anchor
+    # high confidence (mirrors sentiment.py's R1 cap, applied again here so
+    # the LLM cannot relax it).
+    if sentiment.rumor_risk in ("medium", "high"):
+        confidence = _step_down(confidence)
+        logger.debug(_MODULE, "rumor_risk_stepdown",
+                     ticker=ticker, rumor_risk=sentiment.rumor_risk)
+
+    # Conflicting evidence
+    if sentiment.major_contradictions:
+        confidence = _step_down(confidence)
+        logger.debug(_MODULE, "contradictions_stepdown",
+                     ticker=ticker,
+                     contradictions=len(sentiment.major_contradictions))
+
     return confidence
 
 
