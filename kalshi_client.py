@@ -3,6 +3,7 @@ import base64
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import requests
 from cryptography.hazmat.primitives import hashes, serialization
@@ -17,6 +18,7 @@ class KalshiClient:
     def __init__(self, api_key: str, private_key_path: str, base_url: str) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
+        self._base_path = urlparse(self.base_url).path.rstrip("/")
         with open(private_key_path, "rb") as f:
             self._private_key = serialization.load_pem_private_key(f.read(), password=None)
 
@@ -24,8 +26,21 @@ class KalshiClient:
 
     def _sign(self, timestamp: str, method: str, path: str) -> str:
         message = (timestamp + method.upper() + path).encode("utf-8")
-        sig = self._private_key.sign(message, padding.PKCS1v15(), hashes.SHA256())
+        sig = self._private_key.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
         return base64.b64encode(sig).decode("utf-8")
+
+    def _signing_path(self, path: str) -> str:
+        clean_path = path.split("?")[0]
+        if self._base_path and not clean_path.startswith(self._base_path):
+            return self._base_path + clean_path
+        return clean_path
 
     def _headers(self, method: str, path: str) -> dict[str, str]:
         ts = str(int(time.time() * 1000))
@@ -33,7 +48,7 @@ class KalshiClient:
             "Content-Type": "application/json",
             "KALSHI-ACCESS-KEY": self.api_key,
             "KALSHI-ACCESS-TIMESTAMP": ts,
-            "KALSHI-ACCESS-SIGNATURE": self._sign(ts, method, path),
+            "KALSHI-ACCESS-SIGNATURE": self._sign(ts, method, self._signing_path(path)),
         }
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
@@ -64,14 +79,34 @@ class KalshiClient:
         status: str = "open",
         limit: int = 200,
         cursor: Optional[str] = None,
+        event_ticker: Optional[str] = None,
+        series_ticker: Optional[str] = None,
+        mve_filter: Optional[str] = None,
+        tickers: Optional[str] = None,
         category: Optional[str] = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {"status": status, "limit": limit}
         if cursor:
             params["cursor"] = cursor
-        if category:
-            params["category"] = category
+        if event_ticker:
+            params["event_ticker"] = event_ticker
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if mve_filter:
+            params["mve_filter"] = mve_filter
+        if tickers:
+            params["tickers"] = tickers
         return self._get("/markets", params=params)
+
+    def get_series_list(self) -> list[dict[str, Any]]:
+        data = self._get("/series")
+        series = data.get("series", [])
+        return series if isinstance(series, list) else []
+
+    def get_series(self, series_ticker: str) -> dict[str, Any]:
+        data = self._get(f"/series/{series_ticker}")
+        series = data.get("series", data)
+        return series if isinstance(series, dict) else {}
 
     def get_all_markets(self, status: str = "open") -> list[dict[str, Any]]:
         """Paginate through all markets, returning the raw list."""

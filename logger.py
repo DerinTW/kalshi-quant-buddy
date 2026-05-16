@@ -42,8 +42,15 @@ def _write(record: dict[str, Any], filename: str) -> None:
 
 def _console(level: str, module: str, msg: str) -> None:
     ts = datetime.utcnow().strftime("%H:%M:%S")
-    prefix = {"INFO": "·", "WARN": "!", "ERROR": "✗", "DEBUG": "·"}.get(level, "·")
-    print(f"[{ts}] {prefix} [{module}] {msg}", file=sys.stdout if level != "ERROR" else sys.stderr)
+    prefix = {"INFO": "*", "WARN": "!", "ERROR": "x", "DEBUG": "."}.get(level, "*")
+    stream = sys.stdout if level != "ERROR" else sys.stderr
+    line = f"[{ts}] {prefix} [{module}] {msg}"
+    try:
+        print(line, file=stream)
+    except UnicodeEncodeError:
+        encoding = stream.encoding or "utf-8"
+        safe_line = line.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        print(safe_line, file=stream)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -81,7 +88,7 @@ def decision(module: str, ticker: str, decision_type: str, outcome: str, **data:
         **data,
     })
     _write(record, "decisions.jsonl")
-    _console("INFO", module, f"{ticker} → {decision_type}: {outcome}")
+    _console("INFO", module, f"{ticker} -> {decision_type}: {outcome}")
 
 
 def trade(record_data: dict[str, Any]) -> None:

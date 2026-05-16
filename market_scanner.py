@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import logger
 from config import Config
@@ -61,6 +61,38 @@ def _parse_time(raw: Optional[str]) -> Optional[datetime]:
         except ValueError:
             continue
     return None
+
+
+def _cents(raw: Any, dollars_raw: Any = None) -> int:
+    if raw not in (None, ""):
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            pass
+    if dollars_raw in (None, ""):
+        return 0
+    try:
+        return int(round(float(dollars_raw) * 100))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _whole_number(*values: Any) -> int:
+    for value in values:
+        if value in (None, ""):
+            continue
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _normalize_status(raw: Any) -> str:
+    status = str(raw or "").strip().lower()
+    if status == "active":
+        return "open"
+    return status
 
 
 # ── Safety validation ─────────────────────────────────────────────────────────
@@ -132,10 +164,10 @@ def normalize(raw: dict) -> Optional[Market]:
         return None
 
     try:
-        yes_ask = int(raw.get("yes_ask", 0) or 0)
-        yes_bid = int(raw.get("yes_bid", 0) or 0)
-        no_ask  = int(raw.get("no_ask",  0) or 0)
-        no_bid  = int(raw.get("no_bid",  0) or 0)
+        yes_ask = _cents(raw.get("yes_ask"), raw.get("yes_ask_dollars"))
+        yes_bid = _cents(raw.get("yes_bid"), raw.get("yes_bid_dollars"))
+        no_ask  = _cents(raw.get("no_ask"),  raw.get("no_ask_dollars"))
+        no_bid  = _cents(raw.get("no_bid"),  raw.get("no_bid_dollars"))
 
         if yes_ask == 0 and no_bid > 0:
             yes_ask = 100 - no_bid
@@ -161,20 +193,24 @@ def normalize(raw: dict) -> Optional[Market]:
         market = Market(
             ticker=ticker,
             title=(raw.get("title") or raw.get("subtitle") or "").strip(),
-            status=raw.get("status", "").lower(),
+            status=_normalize_status(raw.get("status")),
             yes_ask=yes_ask,
             yes_bid=yes_bid,
             no_ask=no_ask,
             no_bid=no_bid,
-            volume=int(raw.get("volume", 0) or 0),
-            volume_24h=int(raw.get("volume_24h") or raw.get("daily_volume") or 0),
-            open_interest=int(raw.get("open_interest", 0) or 0),
+            volume=_whole_number(raw.get("volume"), raw.get("volume_fp")),
+            volume_24h=_whole_number(
+                raw.get("volume_24h"),
+                raw.get("daily_volume"),
+                raw.get("volume_24h_fp"),
+            ),
+            open_interest=_whole_number(raw.get("open_interest"), raw.get("open_interest_fp")),
             close_time=close_time,
             settlement_time=settle_time,
             category=(raw.get("category") or raw.get("event_category") or "").strip(),
             rules_primary=(raw.get("rules_primary") or raw.get("description") or "").strip(),
             result=raw.get("result"),
-            event_ticker=_derive_event_ticker(ticker),
+            event_ticker=(raw.get("event_ticker") or _derive_event_ticker(ticker)).strip(),
             last_trade_at=last_trade_at,
         )
 
@@ -278,6 +314,8 @@ def enrich_with_history(
                 logger.warn(_MODULE, "rate_limited", ticker=market.ticker,
                             msg="429 — backing off 5s")
                 time.sleep(5.0)
+            elif code == 404:
+                logger.debug(_MODULE, "no_trade_history_endpoint", ticker=market.ticker)
             else:
                 logger.warn(_MODULE, "history_fetch_failed",
                             ticker=market.ticker, err=str(exc))
