@@ -80,7 +80,7 @@ Until we add `category` to the `paper_trades` schema, category exposure for trad
 ## 6. Stale / missing data behavior
 
 - **Filters drop, not crash.** `filters.run` returns a `FilterResult` with structured rejection reasons; nothing raises if a field is missing because `market_scanner._validate` marks the row `is_unsafe` instead.
-- **Orderbook age.** `_check_orderbook_age` rejects when the most recent trade is older than `MAX_ORDERBOOK_AGE_SECONDS` (default 60s); skipped only when `last_trade_at` is unknown (no enrichment).
+- **Snapshot freshness.** `_check_orderbook_age` rejects when our fetched market/orderbook snapshot timestamp (`fetched_at`) is older than `MAX_ORDERBOOK_AGE_SECONDS` (default 60s); skipped only when `fetched_at` is absent for legacy or hand-built objects. `last_trade_at` is an activity/history signal for enrichment and weird-move logic, not the filter's snapshot freshness signal.
 - **Orderbook depth.** `_check_orderbook_depth` rejects when top-of-book depth < `MIN_ORDERBOOK_DEPTH_AT_LIMIT`; skipped when the depth is unknown (0).
 - **Stale book during anomaly check.** `weird_move.detect` classifies `stale_book_artifact` and applies the maximum confidence step-down (`_WEIRD_MOVE_STEPS=2`) in `prediction_model._step_down`.
 - **Research absent.** `pipeline.run_once` substitutes an empty `ResearchResult(failed_reason="research_budget_or_error")` when the research budget is exhausted or the call raised. `sentiment.analyze` produces an honestly weak signal from it; the LLM is never used to invent missing research.

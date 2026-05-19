@@ -211,6 +211,7 @@ def normalize(raw: dict) -> Optional[Market]:
             rules_primary=(raw.get("rules_primary") or raw.get("description") or "").strip(),
             result=raw.get("result"),
             event_ticker=(raw.get("event_ticker") or _derive_event_ticker(ticker)).strip(),
+            fetched_at=datetime.now(timezone.utc),
             last_trade_at=last_trade_at,
         )
 
@@ -332,17 +333,38 @@ def scan(client: KalshiClient, cfg: Config, status: str = "open") -> list[Market
     Returns ALL markets including unsafe ones.
     The filter stage handles unsafe rejection and logging.
     """
-    logger.info(_MODULE, "scan_start", "fetching markets from Kalshi API")
-
-    categories = cfg.category_allowlist if cfg.category_allowlist else [None]
+    categories = list(cfg.category_allowlist)
+    fetch_categories = categories if categories else [None]
+    max_markets = getattr(cfg, "max_raw_markets_per_scan", None)
+    logger.info(
+        _MODULE,
+        "scan_start",
+        "fetching markets from Kalshi API",
+        category_count=len(categories),
+        max_markets=max_markets,
+    )
 
     raw_list: list[dict] = []
-    for cat in categories:
+    for cat in fetch_categories:
         try:
-            batch = client.get_all_markets(status=status)
+            remaining = None
+            if max_markets is not None:
+                remaining = max(0, int(max_markets) - len(raw_list))
+                if remaining <= 0:
+                    break
+            batch = client.get_all_markets(
+                status=status,
+                category=cat,
+                max_markets=remaining,
+            )
             raw_list.extend(batch)
-            logger.debug(_MODULE, "category_fetched",
-                         category=cat or "all", count=len(batch))
+            logger.info(
+                _MODULE,
+                "category_fetched",
+                category=cat or "all",
+                count=len(batch),
+                total_count=len(raw_list),
+            )
         except Exception as exc:
             code = getattr(getattr(exc, "response", None), "status_code", None)
             if code == 429:
@@ -351,6 +373,36 @@ def scan(client: KalshiClient, cfg: Config, status: str = "open") -> list[Market
             else:
                 logger.error(_MODULE, "api_error",
                              category=cat or "all", err=str(exc))
+
+    if categories and not raw_list:
+        logger.warn(
+            _MODULE,
+            "category_fetch_empty_fallback_all_markets",
+            "category-specific fetches returned no markets; fetching all open markets once",
+            category_count=len(categories),
+        )
+        try:
+            batch = client.get_all_markets(
+                status=status,
+                category=None,
+                max_markets=max_markets,
+            )
+            raw_list.extend(batch)
+            logger.info(
+                _MODULE,
+                "category_fetched",
+                category="all",
+                count=len(batch),
+                fallback=True,
+            )
+        except Exception as exc:
+            code = getattr(getattr(exc, "response", None), "status_code", None)
+            if code == 429:
+                logger.error(_MODULE, "rate_limited_on_scan",
+                             msg="rate limit hit during market fetch — try again later")
+            else:
+                logger.error(_MODULE, "api_error",
+                             category="all", err=str(exc), fallback=True)
 
     if not raw_list:
         logger.error(_MODULE, "no_markets_returned",

@@ -241,6 +241,31 @@ def test_main_run_once_starts_single_cycle(cfg, monkeypatch, tmp_path, capsys):
     assert calls["n"] == 1, "--run-once must invoke pipeline.run_once exactly once"
 
 
+def test_main_run_once_applies_max_markets_fetch_cap(cfg, monkeypatch, tmp_path):
+    import main
+    monkeypatch.setattr(sys, "argv", ["main.py", "--run-once", "--max-markets", "25"])
+    monkeypatch.setattr(main, "get_config", lambda: cfg)
+    cfg.log_dir = str(tmp_path / "logs")
+    cfg.db_path = str(tmp_path / "db.sqlite")
+
+    import pipeline as pipe_mod
+    seen = {}
+
+    def fake_run_once(cfg_in, **kwargs):
+        seen["max_raw_markets_per_scan"] = cfg_in.max_raw_markets_per_scan
+        return {
+            "markets_fetched": 0, "markets_passed_filters": 0,
+            "candidates_analyzed": 0, "decisions": [],
+            "executions_attempted": 0, "errors": [],
+        }
+
+    monkeypatch.setattr(pipe_mod, "run_once", fake_run_once)
+
+    main.main()
+
+    assert seen["max_raw_markets_per_scan"] == 25
+
+
 # ── 2. run_once safety: no client → no work, no errors ───────────────────────
 
 def test_run_once_with_no_client_returns_empty_summary(cfg):

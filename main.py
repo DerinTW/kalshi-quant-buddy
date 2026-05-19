@@ -44,6 +44,15 @@ def main() -> None:
         default=None,
         help="Override MAX_CANDIDATES_PER_RUN for this single run.",
     )
+    parser.add_argument(
+        "--max-markets",
+        type=int,
+        default=None,
+        help=(
+            "Cap raw Kalshi markets fetched during this single run. "
+            "Useful for smoke tests; filters and safety gates still run normally."
+        ),
+    )
     args = parser.parse_args()
 
     cfg = get_config()
@@ -88,6 +97,9 @@ def _run_once_cli(cfg, args) -> None:
             "Kalshi credentials missing — running with no market source. "
             "Use a paper environment or set credentials to fetch real markets.",
         )
+
+    if args.max_markets is not None:
+        cfg.max_raw_markets_per_scan = max(0, args.max_markets)
 
     summary = pipeline.run_once(
         cfg,

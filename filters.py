@@ -134,16 +134,27 @@ def _check_liquidity(m: Market, cfg: Config) -> Optional[str]:
 
 def _check_orderbook_age(m: Market, cfg: Config) -> Optional[str]:
     """
-    Reject if the most recent known trade is older than MAX_ORDERBOOK_AGE_SECONDS.
-    Skipped (passes) when last_trade_at is None — we simply don't have the data
-    (enrich_with_history hasn't been called yet or the API omitted the field).
+    Reject if our fetched market/orderbook snapshot is stale.
+
+    This checks freshness of our own fetched market/orderbook snapshot. This is
+    not a last-trade activity check; last_trade_at remains for trade-history /
+    weird-move logic.
+
+    Skipped (passes) when fetched_at is None to preserve compatibility with
+    hand-built tests, fallback markets, and legacy objects.
     """
-    if m.last_trade_at is None:
+    if m.fetched_at is None:
         return None
-    age_seconds = (datetime.now(timezone.utc) - m.last_trade_at).total_seconds()
+
+    fetched_at = m.fetched_at
+    if fetched_at.tzinfo is None or fetched_at.utcoffset() is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+
+    age_seconds = (datetime.now(timezone.utc) - fetched_at).total_seconds()
     if age_seconds > cfg.max_orderbook_age_seconds:
         age_min = age_seconds / 60
-        return f"orderbook_stale ({age_min:.0f}min > {cfg.max_orderbook_age_seconds//60}min)"
+        max_age_min = cfg.max_orderbook_age_seconds / 60
+        return f"snapshot_stale ({age_min:.0f}min > {max_age_min:.0f}min)"
     return None
 
 

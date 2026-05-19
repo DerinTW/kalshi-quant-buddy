@@ -96,6 +96,8 @@ class KalshiClient:
             params["mve_filter"] = mve_filter
         if tickers:
             params["tickers"] = tickers
+        if category:
+            params["category"] = category
         return self._get("/markets", params=params)
 
     def get_series_list(self) -> list[dict[str, Any]]:
@@ -108,21 +110,50 @@ class KalshiClient:
         series = data.get("series", data)
         return series if isinstance(series, dict) else {}
 
-    def get_all_markets(self, status: str = "open") -> list[dict[str, Any]]:
+    def get_all_markets(
+        self,
+        status: str = "open",
+        category: Optional[str] = None,
+        max_markets: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
         """Paginate through all markets, returning the raw list."""
         markets: list[dict[str, Any]] = []
         cursor: Optional[str] = None
         page = 0
+        category_label = category or "all"
         while True:
+            if max_markets is not None and len(markets) >= max_markets:
+                break
             page += 1
-            logger.debug(_MODULE, "paginating", f"page {page}", cursor=cursor)
-            data = self.get_markets(status=status, limit=200, cursor=cursor)
+            limit = 200
+            if max_markets is not None:
+                limit = max(1, min(limit, max_markets - len(markets)))
+            logger.debug(
+                _MODULE,
+                "paginating",
+                f"page {page}",
+                cursor=cursor,
+                category=category_label,
+                max_markets=max_markets,
+            )
+            data = self.get_markets(
+                status=status,
+                limit=limit,
+                cursor=cursor,
+                category=category,
+            )
             batch = data.get("markets", [])
             markets.extend(batch)
             cursor = data.get("cursor")
             if not cursor or not batch:
                 break
-        logger.info(_MODULE, "markets_fetched", f"fetched {len(markets)} markets")
+        logger.info(
+            _MODULE,
+            "markets_fetched",
+            f"fetched {len(markets)} markets",
+            category=category_label,
+            max_markets=max_markets,
+        )
         return markets
 
     def get_market(self, ticker: str) -> dict[str, Any]:

@@ -62,7 +62,9 @@ class Market:
     # event grouping — the series this market belongs to (e.g. "KXBTCD-24DEC31")
     # used by filters to deduplicate markets in the same event group
     event_ticker: str = ""
-    # last known trade time — used to check orderbook freshness
+    # when this market/orderbook snapshot was fetched by the scanner
+    fetched_at: Optional[datetime] = None
+    # last known trade time - used by trade-history / weird-move activity logic
     last_trade_at: Optional[datetime] = None
     # total contracts available at the best ask/bid — set by enrich_with_orderbook_depth()
     orderbook_depth: int = 0
@@ -105,6 +107,7 @@ class Market:
             "is_unsafe":             self.is_unsafe,
             "unsafe_reason":         self.unsafe_reason,
             "event_ticker":          self.event_ticker,
+            "fetched_at":            _iso(self.fetched_at),
             "last_trade_at":         _iso(self.last_trade_at),
             "orderbook_depth":       self.orderbook_depth,
         }

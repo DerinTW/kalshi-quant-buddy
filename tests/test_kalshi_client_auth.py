@@ -90,3 +90,101 @@ def test_headers_sign_normalized_path_without_query(tmp_path, monkeypatch):
     assert headers["KALSHI-ACCESS-SIGNATURE"] == "signature"
     assert signed["method"] == "GET"
     assert signed["path"] == "/trade-api/v2/markets"
+
+
+def test_get_markets_passes_category_when_present(monkeypatch):
+    client = object.__new__(KalshiClient)
+    calls = []
+
+    def fake_get(path, params=None):
+        calls.append((path, params))
+        return {"markets": []}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+
+    client.get_markets(status="open", limit=200, category="crypto")
+
+    assert calls == [
+        (
+            "/markets",
+            {"status": "open", "limit": 200, "category": "crypto"},
+        )
+    ]
+
+
+def test_get_markets_omits_category_when_none(monkeypatch):
+    client = object.__new__(KalshiClient)
+    calls = []
+
+    def fake_get(path, params=None):
+        calls.append((path, params))
+        return {"markets": []}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+
+    client.get_markets(status="open", limit=200, category=None)
+
+    assert calls == [("/markets", {"status": "open", "limit": 200})]
+
+
+def test_get_all_markets_passes_category_through_pagination(monkeypatch):
+    client = object.__new__(KalshiClient)
+    calls = []
+    responses = [
+        {"markets": [{"ticker": "A"}], "cursor": "next-page"},
+        {"markets": [{"ticker": "B"}], "cursor": ""},
+    ]
+
+    def fake_get_markets(status="open", limit=200, cursor=None, category=None):
+        calls.append(
+            {
+                "status": status,
+                "limit": limit,
+                "cursor": cursor,
+                "category": category,
+            }
+        )
+        return responses.pop(0)
+
+    monkeypatch.setattr(client, "get_markets", fake_get_markets)
+
+    markets = client.get_all_markets(status="open", category="crypto")
+
+    assert markets == [{"ticker": "A"}, {"ticker": "B"}]
+    assert calls == [
+        {"status": "open", "limit": 200, "cursor": None, "category": "crypto"},
+        {"status": "open", "limit": 200, "cursor": "next-page", "category": "crypto"},
+    ]
+
+
+def test_get_all_markets_honors_max_markets(monkeypatch):
+    client = object.__new__(KalshiClient)
+    calls = []
+    responses = [
+        {"markets": [{"ticker": "A"}, {"ticker": "B"}], "cursor": "next-page"},
+        {"markets": [{"ticker": "C"}], "cursor": ""},
+    ]
+
+    def fake_get_markets(status="open", limit=200, cursor=None, category=None):
+        calls.append(
+            {
+                "status": status,
+                "limit": limit,
+                "cursor": cursor,
+                "category": category,
+            }
+        )
+        return responses.pop(0)
+
+    monkeypatch.setattr(client, "get_markets", fake_get_markets)
+
+    markets = client.get_all_markets(
+        status="open",
+        category="crypto",
+        max_markets=2,
+    )
+
+    assert markets == [{"ticker": "A"}, {"ticker": "B"}]
+    assert calls == [
+        {"status": "open", "limit": 2, "cursor": None, "category": "crypto"},
+    ]

@@ -83,7 +83,7 @@ class Config:
     max_yes_price: int = field(default_factory=lambda: int(os.getenv("MAX_YES_PRICE", "85")))
     # Absolute spread cap in cents (yes_ask - yes_bid); separate from the pct check
     max_spread_cents: int = field(default_factory=lambda: _env_int(("MAX_SPREAD_CENTS",), "6"))
-    # How old the most recent orderbook trade can be before the market is considered stale
+    # How old our fetched market/orderbook snapshot can be before it is considered stale
     max_orderbook_age_seconds: int = field(default_factory=lambda: int(os.getenv("MAX_ORDERBOOK_AGE_SECONDS", "60")))
     # Minimum contracts available at the best ask/bid before the market is considered too thin
     min_orderbook_depth_at_limit: int = field(default_factory=lambda: int(os.getenv("MIN_ORDERBOOK_DEPTH_AT_LIMIT", "100")))
@@ -93,6 +93,14 @@ class Config:
         default_factory=lambda: [
             c.strip() for c in os.getenv("CATEGORY_ALLOWLIST", "crypto,economic,financial,weather").split(",") if c.strip()
         ]
+    )
+    # Optional fetch cap for smoke tests/manual runs. None means full scan.
+    max_raw_markets_per_scan: int | None = field(
+        default_factory=lambda: (
+            int(os.getenv("MAX_RAW_MARKETS_PER_SCAN"))
+            if os.getenv("MAX_RAW_MARKETS_PER_SCAN")
+            else None
+        )
     )
     # Comma-separated list of tickers that are permanently blocked
     blocked_tickers: set[str] = field(

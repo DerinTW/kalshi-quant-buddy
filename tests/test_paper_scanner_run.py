@@ -26,9 +26,15 @@ class FakeKalshiDataClient:
         self.raw_markets = raw_markets
         self.place_order_called = False
 
-    def get_all_markets(self, status: str = "open") -> list[dict]:
+    def get_all_markets(
+        self,
+        status: str = "open",
+        category=None,
+        max_markets=None,
+    ) -> list[dict]:
         assert status == "open"
-        return list(self.raw_markets)
+        markets = list(self.raw_markets)
+        return markets[:max_markets] if max_markets is not None else markets
 
     def get_orderbook(self, ticker: str, depth: int = 10) -> dict:
         return {
@@ -49,7 +55,13 @@ class FakeKalshiDataClient:
 
 
 class FakeEnvelopeKalshiDataClient(FakeKalshiDataClient):
-    def get_markets(self, status: str = "open", limit: int = 25, category=None) -> dict:
+    def get_markets(
+        self,
+        status: str = "open",
+        limit: int = 25,
+        category=None,
+        mve_filter=None,
+    ) -> dict:
         assert status == "open"
         return {"markets": list(self.raw_markets), "cursor": ""}
 
