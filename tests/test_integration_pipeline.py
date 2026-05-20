@@ -20,9 +20,9 @@ def _cfg() -> Config:
     cfg.trading_mode = "paper"
     cfg.live_trading_enabled = False
     cfg.min_liquidity_dollars = 500
-    cfg.min_volume_24h = 1000
+    cfg.min_volume_24h = 500
     cfg.max_spread_cents = 6
-    cfg.max_spread_pct = 15
+    cfg.max_spread_pct = 20
     cfg.min_minutes_to_expiry = 20
     cfg.max_minutes_to_expiry = 4320
     cfg.min_yes_price = 15

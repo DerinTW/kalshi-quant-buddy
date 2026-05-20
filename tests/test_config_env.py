@@ -63,6 +63,8 @@ def test_config_default_safety_values():
     assert c.max_live_dollars_per_trade == 1.0
     assert c.min_paper_days_before_live == 7
     assert c.min_paper_trades_before_live == 100
+    assert c.max_spread_pct == 20.0
+    assert c.min_volume_24h == 500
 
 
 def test_config_backwards_compatible_env_aliases(monkeypatch):
@@ -95,6 +97,8 @@ def test_env_example_contains_required_safety_variables():
     assert _env_value(text, "MAX_LIVE_TRADE_DOLLARS") == "1"
     assert _env_value(text, "MIN_PAPER_TRADES_BEFORE_LIVE") == "100"
     assert _env_value(text, "DEBUG") == "false"
+    assert _env_value(text, "MAX_SPREAD_PCT") == "20"
+    assert _env_value(text, "MIN_VOLUME_24H") == "500"
 
 
 def test_env_example_contains_weird_move_documented_constants():
