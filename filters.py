@@ -25,6 +25,31 @@ _MODULE = "filters"
 # Max example tickers to show per rejection reason in the summary log
 _MAX_EXAMPLES = 3
 
+# Category alias table — Kalshi returns human-friendly category strings
+# ("Crypto", "Climate and Weather", "Economics", "Financials"); the rest of
+# the project, the env var CATEGORY_ALLOWLIST, and downstream code all use
+# the short lowercase form. Normalise both sides through this map before
+# comparing so the filter is not silently rejecting every market.
+_CATEGORY_ALIASES: dict[str, str] = {
+    "climate and weather": "weather",
+    "climate":             "weather",
+    "weather":             "weather",
+    "economics":           "economic",
+    "economic":            "economic",
+    "financials":          "financial",
+    "financial":           "financial",
+    "crypto":              "crypto",
+    "cryptocurrency":      "crypto",
+    "politics":            "politics",
+    "sports":              "sports",
+}
+
+
+def _normalize_category(value: object) -> str:
+    """Lowercase + alias-collapse so 'Climate and Weather' == 'weather'."""
+    text = str(value or "").strip().lower()
+    return _CATEGORY_ALIASES.get(text, text)
+
 
 # ── Result type ───────────────────────────────────────────────────────────────
 
@@ -88,7 +113,10 @@ def _check_blocked(m: Market, cfg: Config) -> Optional[str]:
 
 
 def _check_category(m: Market, cfg: Config) -> Optional[str]:
-    if cfg.category_allowlist and m.category not in cfg.category_allowlist:
+    if not cfg.category_allowlist:
+        return None
+    allow = {_normalize_category(c) for c in cfg.category_allowlist}
+    if _normalize_category(m.category) not in allow:
         return f"category={m.category!r} not in allowlist"
     return None
 
@@ -161,10 +189,16 @@ def _check_orderbook_age(m: Market, cfg: Config) -> Optional[str]:
 def _check_orderbook_depth(m: Market, cfg: Config) -> Optional[str]:
     """
     Reject if top-of-book depth is below MIN_ORDERBOOK_DEPTH_AT_LIMIT.
-    Skipped (passes) when orderbook_depth == 0 — enrich_with_orderbook_depth()
-    hasn't been called yet for this market.
+
+    Two distinct states matter:
+      * orderbook_depth_fetched == False  → enrichment was never attempted
+        (e.g. this market wasn't in the candidate slice). Skip the check;
+        the upstream pipeline is responsible for enriching candidates.
+      * orderbook_depth_fetched == True   → we asked the API and got an
+        answer. Now `orderbook_depth == 0` means an empty book — that is a
+        rejection, not a free pass.
     """
-    if m.orderbook_depth == 0:
+    if not m.orderbook_depth_fetched:
         return None
     if m.orderbook_depth < cfg.min_orderbook_depth_at_limit:
         return f"depth={m.orderbook_depth} < min {cfg.min_orderbook_depth_at_limit}"
@@ -226,7 +260,8 @@ def _deduplicate(
                 reason = f"duplicate_event_group (kept={winner.ticker})"
                 rejected.append((m, reason))
                 logger.debug(_MODULE, "dedup_rejected",
-                             ticker=m.ticker, kept=winner.ticker, event=event_key)
+                             ticker=m.ticker, kept=winner.ticker,
+                             event_ticker=event_key)
 
     return accepted
 
@@ -269,15 +304,28 @@ def _log_summary(result: FilterResult, total: int) -> None:
         _MODULE, "filter_summary",
         f"passed={len(result.passed)}  rejected={len(result.rejected)}  "
         f"total={total}  pass_rate={result.pass_rate:.0%}",
+        passed=len(result.passed),
+        rejected=len(result.rejected),
+        total=total,
+        pass_rate=round(result.pass_rate, 4),
     )
 
     if counts:
         logger.info(_MODULE, "rejection_breakdown",
                     msg="skip reason counts (most common first):",
-                    counts=counts)
+                    counts=counts,
+                    examples=examples)
         for reason_key, tickers in examples.items():
             logger.debug(
                 _MODULE, "rejection_examples",
                 reason=reason_key,
                 examples=tickers,
             )
+    elif total > 0 and len(result.passed) == 0:
+        # Pipeline returned zero candidates with zero rejections — usually
+        # means filters never ran or the input list was already empty
+        # post-normalisation. Surface it loudly.
+        logger.warn(_MODULE, "filter_zero_pass_zero_reject",
+                    msg="filters returned 0 passed and 0 rejected — "
+                        "check normalisation/category aliasing upstream",
+                    total=total)

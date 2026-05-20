@@ -68,6 +68,10 @@ class Market:
     last_trade_at: Optional[datetime] = None
     # total contracts available at the best ask/bid — set by enrich_with_orderbook_depth()
     orderbook_depth: int = 0
+    # True once enrich_with_orderbook_depth() has been called for this market
+    # (even if the book was empty). Distinguishes "we never asked" from
+    # "we asked and got 0" so the depth filter can reject empty books.
+    orderbook_depth_fetched: bool = False
 
     # ── Step 18 blueprint compatibility ──────────────────────────────────
     @property
@@ -110,6 +114,7 @@ class Market:
             "fetched_at":            _iso(self.fetched_at),
             "last_trade_at":         _iso(self.last_trade_at),
             "orderbook_depth":       self.orderbook_depth,
+            "orderbook_depth_fetched": self.orderbook_depth_fetched,
         }
 
 

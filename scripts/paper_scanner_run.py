@@ -116,9 +116,10 @@ def run_scan(
     raw_markets = _fetch_raw_markets(client, limit=limit, category=category)
     normalized = _normalize_markets(raw_markets)
     if category:
+        desired = filters._normalize_category(category)
         normalized = [
             market for market in normalized
-            if market.category.lower() == category.strip().lower()
+            if filters._normalize_category(market.category) == desired
         ]
 
     enrichment_subset = _select_candidates(

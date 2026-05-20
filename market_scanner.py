@@ -262,6 +262,9 @@ def enrich_with_orderbook_depth(
                 )
             else:
                 market.orderbook_depth = 0
+            # Mark fetched even when the book was empty — the filter needs to
+            # distinguish "we didn't ask" from "we asked, book was thin/empty".
+            market.orderbook_depth_fetched = True
         except Exception as exc:
             code = getattr(getattr(exc, "response", None), "status_code", None)
             if code == 429:
