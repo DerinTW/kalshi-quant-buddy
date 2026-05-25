@@ -188,3 +188,37 @@ def test_get_all_markets_honors_max_markets(monkeypatch):
     assert calls == [
         {"status": "open", "limit": 2, "cursor": None, "category": "crypto"},
     ]
+
+
+def test_get_best_prices_parses_current_orderbook_fp_shape(monkeypatch):
+    client = object.__new__(KalshiClient)
+
+    monkeypatch.setattr(
+        client,
+        "get_orderbook",
+        lambda ticker, depth=1: {
+            "orderbook_fp": {
+                "yes_dollars": [["0.0100", "200.00"], ["0.4200", "13.00"]],
+                "no_dollars": [["0.0100", "100.00"], ["0.5600", "117.00"]],
+            }
+        },
+    )
+
+    assert client.get_best_prices("KXTEST") == (44, 42)
+
+
+def test_get_best_prices_parses_legacy_bid_only_shape(monkeypatch):
+    client = object.__new__(KalshiClient)
+
+    monkeypatch.setattr(
+        client,
+        "get_orderbook",
+        lambda ticker, depth=1: {
+            "orderbook": {
+                "yes": [[1, 200], [42, 13]],
+                "no": [[1, 100], [56, 117]],
+            }
+        },
+    )
+
+    assert client.get_best_prices("KXTEST") == (44, 42)

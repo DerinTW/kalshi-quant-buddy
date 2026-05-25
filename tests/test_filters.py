@@ -42,7 +42,15 @@ def make_cfg(**overrides) -> Config:
         max_spread_cents=6,
         max_orderbook_age_seconds=60,
         min_orderbook_depth_at_limit=100,
-        category_allowlist=["crypto", "economic", "financial", "weather"],
+        category_allowlist=[
+            "crypto",
+            "economic",
+            "financial",
+            "commodities",
+            "weather",
+            "science and technology",
+            "culture",
+        ],
         blocked_tickers=set(),
     )
     base.update(overrides)
@@ -255,8 +263,21 @@ def test_category_allowlist_accepts_kalshi_capitalised_form():
         ("Climate and Weather", "weather"),
         ("Economics", "economic"),
         ("Financials", "financial"),
+        ("Commodities", "commodities"),
+        ("Science and Technology", "science and technology"),
+        ("Culture", "culture"),
     ]
-    cfg = make_cfg(category_allowlist=["crypto", "economic", "financial", "weather"])
+    cfg = make_cfg(
+        category_allowlist=[
+            "crypto",
+            "economic",
+            "financial",
+            "commodities",
+            "weather",
+            "science and technology",
+            "culture",
+        ]
+    )
     for raw_category, _short in cases:
         m = valid_market(ticker=f"KX-{raw_category}", category=raw_category)
         result = filters.run([m], cfg)
@@ -272,6 +293,19 @@ def test_category_outside_allowlist_rejected():
     result = filters.run([m], cfg)
     assert result.passed == []
     assert "category" in result.skip_reason_counts
+
+
+def test_category_allowlist_accepts_requested_user_facing_names():
+    cases = [
+        ("Financials", "finance"),
+        ("Economics", "economics"),
+        ("Climate and Weather", "climate"),
+        ("Science and Technology", "tech & science"),
+    ]
+    for raw_category, allowed_category in cases:
+        m = valid_market(ticker=f"KX-{allowed_category}", category=raw_category)
+        result = filters.run([m], make_cfg(category_allowlist=[allowed_category]))
+        assert len(result.passed) == 1
 
 
 def test_empty_allowlist_accepts_all_categories():
@@ -343,6 +377,47 @@ def test_enrich_with_orderbook_depth_sets_fetched_flag(monkeypatch):
     assert market.orderbook_depth == 250
 
 
+def test_enrich_with_orderbook_depth_parses_current_orderbook_fp_shape(monkeypatch):
+    """Kalshi REST orderbooks currently return bid-only fixed-point arrays.
+    The best bid is the last level; NO bid depth is executable YES-ask depth."""
+    import market_scanner
+
+    market = valid_market(orderbook_depth=0, orderbook_depth_fetched=False)
+
+    class FixedPointBookClient:
+        def get_orderbook(self, ticker, depth=10):
+            return {
+                "orderbook_fp": {
+                    "yes_dollars": [["0.0100", "200.00"], ["0.4200", "13.00"]],
+                    "no_dollars": [["0.0100", "100.00"], ["0.5600", "117.00"]],
+                }
+            }
+
+    market_scanner.enrich_with_orderbook_depth(
+        [market], FixedPointBookClient(), depth=10, delay_seconds=0.0
+    )
+
+    assert market.orderbook_depth_fetched is True
+    assert market.orderbook_depth == 117
+
+
+def test_enrich_with_orderbook_depth_supports_legacy_bid_only_orderbook(monkeypatch):
+    import market_scanner
+
+    market = valid_market(orderbook_depth=0, orderbook_depth_fetched=False)
+
+    class LegacyBidOnlyClient:
+        def get_orderbook(self, ticker, depth=10):
+            return {"orderbook": {"yes": [[1, 200], [42, 13]], "no": [[1, 100], [56, 117]]}}
+
+    market_scanner.enrich_with_orderbook_depth(
+        [market], LegacyBidOnlyClient(), depth=10, delay_seconds=0.0
+    )
+
+    assert market.orderbook_depth_fetched is True
+    assert market.orderbook_depth == 117
+
+
 def test_enrich_with_orderbook_depth_marks_empty_book_as_fetched(monkeypatch):
     """An empty asks list still counts as a successful fetch; the depth
     filter must then reject the market rather than pass it silently."""
@@ -364,6 +439,40 @@ def test_enrich_with_orderbook_depth_marks_empty_book_as_fetched(monkeypatch):
     result = filters.run([market], make_cfg(min_orderbook_depth_at_limit=100))
     assert result.passed == []
     assert "depth" in result.skip_reason_counts
+
+
+def test_enrich_with_orderbook_depth_does_not_mark_unrecognized_payload_as_fetched(monkeypatch):
+    import market_scanner
+
+    market = valid_market(orderbook_depth=10, orderbook_depth_fetched=False)
+
+    class BadShapeClient:
+        def get_orderbook(self, ticker, depth=10):
+            return {"unexpected": {"yes_dollars": [["0.4200", "13.00"]]}}
+
+    market_scanner.enrich_with_orderbook_depth(
+        [market], BadShapeClient(), depth=10, delay_seconds=0.0
+    )
+
+    assert market.orderbook_depth == 10
+    assert market.orderbook_depth_fetched is False
+
+
+def test_enrich_with_orderbook_depth_does_not_mark_fetch_exception_as_fetched(monkeypatch):
+    import market_scanner
+
+    market = valid_market(orderbook_depth=10, orderbook_depth_fetched=False)
+
+    class FailingClient:
+        def get_orderbook(self, ticker, depth=10):
+            raise RuntimeError("network down")
+
+    market_scanner.enrich_with_orderbook_depth(
+        [market], FailingClient(), depth=10, delay_seconds=0.0
+    )
+
+    assert market.orderbook_depth == 10
+    assert market.orderbook_depth_fetched is False
 
 
 # ── Dedup pass keeps the best market per event group ────────────────────────

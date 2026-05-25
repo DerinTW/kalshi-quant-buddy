@@ -24,6 +24,7 @@ import llm
 import prediction_model as pm
 from config import Config
 from models import (
+    BaseRateSignal,
     Market,
     ProbabilityEstimate,
     ResearchResult,
@@ -31,6 +32,8 @@ from models import (
     SentimentResult,
     WeirdMoveSignal,
 )
+
+_REAL_ESTIMATE_PROBABILITY = llm.estimate_probability
 
 
 # ── Fixtures / builders ──────────────────────────────────────────────────────
@@ -128,6 +131,7 @@ def make_sentiment(
     cred: float = 0.85,
     rel: float = 0.9,
     rumor_risk: str = "low",
+    signal_clarity: str = "low",
 ) -> SentimentResult:
     return SentimentResult(
         ticker="KX",
@@ -141,6 +145,7 @@ def make_sentiment(
         source_credibility=cred,
         event_relevance=rel,
         rumor_risk=rumor_risk,
+        signal_clarity=signal_clarity,
     )
 
 
@@ -342,6 +347,160 @@ def test_llm_adjustment_capped_at_10pp(monkeypatch, cfg):
     p_market = 0.29
     expected_max = _W_MARKET_EXPECTED * p_market + _W_RESEARCH_EXPECTED * p_market + _W_LLM_EXPECTED * (p_market + 0.10)
     assert out.yes_probability <= expected_max + 1e-9
+
+
+def test_probability_estimate_omits_deprecated_temperature(monkeypatch, cfg):
+    calls: list[object] = []
+
+    def fake_call_json(c, system, user, *, max_tokens=0, temperature=0.1):
+        calls.append(temperature)
+        if temperature is not None:
+            raise TypeError("temperature is deprecated for this model")
+        return {
+            "estimated_yes_probability": 0.61,
+            "estimated_no_probability": 0.39,
+            "confidence": 0.8,
+            "main_factors": ["evidence supports yes"],
+            "uncertainty_factors": [],
+            "probability_rationale": "Temperature-free estimator response.",
+            "overconfidence_warning": False,
+        }
+
+    monkeypatch.setattr(llm, "estimate_probability", _REAL_ESTIMATE_PROBABILITY)
+    monkeypatch.setattr(llm, "call_json", fake_call_json)
+
+    market = make_market(yes_ask=55, yes_bid=53)
+    out = pm.estimate(market, make_research(), make_sentiment(), make_weird_move(), cfg)
+
+    assert calls == [None]
+    assert out.confidence == "medium-high"
+    assert "Temperature-free" in out.reasoning
+
+
+def test_clear_official_weather_signal_confidence_floor(monkeypatch, cfg):
+    def low_conf_llm(cfg, *args, **kwargs):
+        return {
+            "yes_probability": 0.54,
+            "confidence": "low",
+            "reasoning": "low confidence stub",
+            "assumptions": [],
+            "invalidation_conditions": [],
+        }
+
+    monkeypatch.setattr(llm, "estimate_probability", low_conf_llm)
+    research = ResearchResult(
+        ticker="KXWEATHER",
+        query="weather",
+        signal_clarity="high",
+        items=[
+            ResearchItem(
+                source="NOAA",
+                url="",
+                published_at=datetime.now(timezone.utc),
+                claim="Official forecast is clearly above the threshold.",
+                direction="supports_yes",
+                relevance=0.98,
+                credibility=0.96,
+                recency_score=1.0,
+                summary="clear",
+                agent="test",
+            )
+        ],
+    )
+    sentiment_result = make_sentiment(
+        direction="supports_yes",
+        cred=0.96,
+        rel=0.98,
+        signal_clarity="high",
+    )
+
+    out = pm.estimate(
+        make_market(category="weather", title="Temperature above 70"),
+        research,
+        sentiment_result,
+        make_weird_move(),
+        cfg,
+    )
+
+    assert pm.confidence_weight(out.confidence) >= 0.50
+    assert out.confidence_breakdown["floor_applied"] == "official_clear_directional_signal"
+
+
+def test_base_rate_divergence_applies_confidence_floor(monkeypatch, cfg):
+    def low_conf_llm(cfg, *args, **kwargs):
+        return {
+            "yes_probability": 0.30,
+            "confidence": "low",
+            "reasoning": "low confidence stub",
+            "assumptions": [],
+            "invalidation_conditions": [],
+        }
+
+    monkeypatch.setattr(llm, "estimate_probability", low_conf_llm)
+    market = make_market(
+        yes_ask=31,
+        yes_bid=29,
+        title="Temperature between 70 and 80",
+        category="weather",
+    )
+    signal = BaseRateSignal(
+        source="precomputed_base_rate",
+        historical_base_rate=0.70,
+        coverage="10y same station",
+        confidence=0.8,
+        notes="fixture",
+    )
+
+    out = pm.estimate(
+        market,
+        make_research(),
+        make_sentiment(direction="neutral", impact=0),
+        make_weird_move(),
+        cfg,
+        base_rate_signal=signal,
+    )
+
+    assert pm.confidence_weight(out.confidence) >= 0.55
+    assert out.confidence_breakdown["floor_applied"] == "historical_base_rate_diverges_from_market"
+    assert out.confidence_breakdown["base_rate_reason"] == "historical_base_rate_used"
+
+
+def test_missing_base_rate_data_does_not_fabricate_probability_or_confidence(cfg):
+    market = make_market(
+        yes_ask=41,
+        yes_bid=39,
+        title="Temperature between 70 and 80",
+        category="weather",
+    )
+    unavailable = BaseRateSignal(
+        source="precomputed_base_rate",
+        historical_base_rate=None,
+        coverage="unavailable",
+        confidence=0.0,
+        notes="historical_base_rate_unavailable",
+        available=False,
+    )
+
+    out_without = pm.estimate(
+        market,
+        make_research(),
+        make_sentiment(direction="neutral", impact=0),
+        make_weird_move(),
+        cfg,
+        base_rate_signal=None,
+    )
+    out_unavailable = pm.estimate(
+        market,
+        make_research(),
+        make_sentiment(direction="neutral", impact=0),
+        make_weird_move(),
+        cfg,
+        base_rate_signal=unavailable,
+    )
+
+    assert out_unavailable.yes_probability == pytest.approx(out_without.yes_probability)
+    assert out_unavailable.confidence == out_without.confidence
+    assert out_unavailable.confidence_breakdown["base_rate_reason"] == "historical_base_rate_unavailable"
 
 
 # These mirror the constants in prediction_model — recorded here so the test

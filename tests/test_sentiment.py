@@ -248,7 +248,7 @@ def test_to_spec_dict_returns_exact_schema():
     assert set(d.keys()) == {
         "sentiment_score", "narrative_direction", "source_credibility",
         "event_relevance", "market_impact_estimate_cents", "confidence",
-        "contradictions", "rumor_risk",
+        "contradictions", "rumor_risk", "signal_clarity",
     }
     assert isinstance(d["sentiment_score"], float)
     assert d["narrative_direction"] in ("supports_yes", "supports_no", "mixed", "neutral")
@@ -258,6 +258,46 @@ def test_to_spec_dict_returns_exact_schema():
     assert 0.0 <= d["confidence"] <= 1.0
     assert isinstance(d["contradictions"], list)
     assert d["rumor_risk"] in ("low", "medium", "high")
+    assert d["signal_clarity"] in ("low", "medium", "high")
+
+
+def test_official_directional_weather_data_sets_confidence_floor():
+    items = [
+        item(
+            source="NOAA",
+            direction="supports_yes",
+            credibility=0.96,
+            relevance=0.98,
+            recency=1.0,
+            claim="Official forecast is clearly above the market threshold.",
+        )
+    ]
+
+    r = sentiment.analyze(make_market(category="weather"), research_with(items))
+
+    assert r.narrative_direction == "supports_yes"
+    assert r.signal_clarity == "high"
+    assert r.confidence >= 0.50
+
+
+def test_low_credibility_contradictions_do_not_crush_clear_official_evidence():
+    items = [
+        item(
+            source="NOAA",
+            direction="supports_yes",
+            credibility=0.96,
+            relevance=0.98,
+            recency=1.0,
+            claim="Official forecast is clearly above the market threshold.",
+        ),
+        item(source="reddit", direction="supports_no", credibility=0.25),
+        item(source="x.com", direction="supports_no", credibility=0.35),
+    ]
+
+    r = sentiment.analyze(make_market(category="weather"), research_with(items))
+
+    assert r.signal_clarity == "high"
+    assert r.confidence >= 0.45
 
 
 # ── Back-compat: existing prediction_model.py reads ──────────────────────────

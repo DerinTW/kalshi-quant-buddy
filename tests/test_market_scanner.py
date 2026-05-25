@@ -145,3 +145,85 @@ def test_scan_honors_raw_market_fetch_cap_across_categories(tmp_path):
         "KXCRYPTO1-26MAY15",
         "KXCRYPTO2-26MAY15",
     ]
+
+
+def test_scan_prefilters_blocked_sports_prefix_before_normalize(monkeypatch, tmp_path):
+    sports = dict(
+        _raw_market("KXATP-26MAY15-DJOKER", "sports"),
+        event_ticker="KXATP-26MAY15",
+        title="Will a tennis player win this ATP match?",
+    )
+    allowed = _raw_market("KXWEATHER-26MAY15-RAIN", "weather")
+    client = FakeScannerClient({"weather": [sports, allowed]})
+    c = _cfg(tmp_path, ["weather"])
+    c.blocked_event_prefixes = ["KXATP", "KXWNBA"]
+    normalized: list[str] = []
+    real_normalize = market_scanner.normalize
+
+    def spy_normalize(raw):
+        normalized.append(raw["ticker"])
+        return real_normalize(raw)
+
+    monkeypatch.setattr(market_scanner, "normalize", spy_normalize)
+
+    markets = market_scanner.scan(client, c)
+
+    assert [market.ticker for market in markets] == ["KXWEATHER-26MAY15-RAIN"]
+    assert normalized == ["KXWEATHER-26MAY15-RAIN"]
+
+
+def test_prefilter_allows_default_tradable_categories(tmp_path):
+    c = _cfg(
+        tmp_path,
+        [
+            "crypto",
+            "economic",
+            "financial",
+            "commodities",
+            "weather",
+            "science and technology",
+            "culture",
+        ],
+    )
+    c.blocked_event_prefixes = ["KXATP", "KXWNBA"]
+
+    for category in (
+        "crypto",
+        "economic",
+        "financial",
+        "commodities",
+        "weather",
+        "science and technology",
+        "culture",
+    ):
+        raw = _raw_market(f"KX{category.upper()}-26MAY15", category)
+        assert market_scanner.prefilter_raw_market(raw, c) is None
+
+
+def test_prefilter_allows_requested_user_facing_category_names(tmp_path):
+    c = _cfg(
+        tmp_path,
+        ["crypto", "finance", "economics", "commodities", "climate", "tech & science", "culture"],
+    )
+    c.blocked_event_prefixes = []
+
+    cases = [
+        ("crypto", "Crypto"),
+        ("finance", "Financials"),
+        ("economics", "Economics"),
+        ("commodities", "Commodities"),
+        ("climate", "Climate and Weather"),
+        ("tech", "Science and Technology"),
+        ("culture", "Culture"),
+    ]
+    for ticker_part, raw_category in cases:
+        raw = _raw_market(f"KX{ticker_part.upper()}-26MAY15", raw_category)
+        assert market_scanner.prefilter_raw_market(raw, c) is None
+
+
+def test_prefilter_prefix_does_not_block_unrelated_ticker(tmp_path):
+    c = _cfg(tmp_path, ["science and technology"])
+    c.blocked_event_prefixes = ["KXATP"]
+    raw = _raw_market("KXATOMIC-26MAY15", "science and technology")
+
+    assert market_scanner.prefilter_raw_market(raw, c) is None

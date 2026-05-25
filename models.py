@@ -263,6 +263,8 @@ class ResearchResult:
     query: str
     items: list[ResearchItem] = field(default_factory=list)
     failed_reason: str = ""
+    signal_clarity: str = "low"  # high | medium | low
+    base_rate_signal: Optional["BaseRateSignal"] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     @property
@@ -303,7 +305,35 @@ class ResearchResult:
             "query":         self.query,
             "items":         [item.to_dict() for item in self.items],
             "failed_reason": self.failed_reason,
+            "signal_clarity": self.signal_clarity,
+            "base_rate_signal": (
+                self.base_rate_signal.to_dict() if self.base_rate_signal else None
+            ),
             "timestamp":     _iso(self.timestamp),
+        }
+
+
+@dataclass
+class BaseRateSignal:
+    source: str
+    historical_base_rate: Optional[float]
+    coverage: str
+    confidence: float
+    notes: str = ""
+    available: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            "source": self.source,
+            "historical_base_rate": (
+                round(_clamp01(self.historical_base_rate), 6)
+                if self.historical_base_rate is not None
+                else None
+            ),
+            "coverage": self.coverage,
+            "confidence": round(_clamp01(self.confidence), 4),
+            "notes": self.notes,
+            "available": bool(self.available),
         }
 
 
@@ -322,6 +352,7 @@ class SentimentResult:
     source_credibility: float = 0.0     # weighted avg credibility of inputs
     event_relevance: float = 0.0        # weighted avg relevance of inputs
     rumor_risk: str = "low"             # low | medium | high
+    signal_clarity: str = "low"         # high | medium | low
 
     def to_spec_dict(self) -> dict:
         """
@@ -339,6 +370,7 @@ class SentimentResult:
             "confidence":                   round(self.confidence, 4),
             "contradictions":               list(self.major_contradictions),
             "rumor_risk":                   self.rumor_risk,
+            "signal_clarity":                self.signal_clarity,
         }
 
     def to_dict(self) -> dict:
@@ -356,6 +388,7 @@ class SentimentResult:
             "source_credibility":           round(_clamp01(self.source_credibility), 4),
             "event_relevance":              round(_clamp01(self.event_relevance), 4),
             "rumor_risk":                   self.rumor_risk,
+            "signal_clarity":                self.signal_clarity,
         }
 
 
@@ -427,6 +460,8 @@ class ProbabilityEstimate:
     reasoning: str
     assumptions: list[str] = field(default_factory=list)
     invalidation_conditions: list[str] = field(default_factory=list)
+    confidence_breakdown: dict[str, Any] = field(default_factory=dict)
+    base_rate_signal: Optional[BaseRateSignal] = None
     timestamp: datetime = field(default_factory=datetime.utcnow)
 
     @property
@@ -443,6 +478,10 @@ class ProbabilityEstimate:
             "reasoning":               self.reasoning,
             "assumptions":             _str_list(self.assumptions),
             "invalidation_conditions": _str_list(self.invalidation_conditions),
+            "confidence_breakdown":     self.confidence_breakdown,
+            "base_rate_signal": (
+                self.base_rate_signal.to_dict() if self.base_rate_signal else None
+            ),
             "timestamp":               _iso(self.timestamp),
         }
 

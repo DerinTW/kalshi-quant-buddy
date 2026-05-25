@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -61,6 +62,7 @@ class FakeEnvelopeKalshiDataClient(FakeKalshiDataClient):
         limit: int = 25,
         category=None,
         mve_filter=None,
+        cursor=None,
     ) -> dict:
         assert status == "open"
         return {"markets": list(self.raw_markets), "cursor": ""}
@@ -117,6 +119,13 @@ def raw_market(ticker: str = "KXTEST-26MAY15") -> dict:
         "category": "crypto",
         "rules_primary": "Test rules.",
     }
+
+
+def agent_records(tmp_path: Path) -> list[dict]:
+    path = tmp_path / "logs" / "agent.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def raw_market_new_schema(ticker: str = "KXTEST-26MAY15") -> dict:
@@ -291,6 +300,20 @@ def test_default_run_does_not_insert_paper_trades(tmp_path, patched_pipeline):
     assert summary["decisions"][0]["action"] == "BUY_YES"
     assert summary["decisions"][0]["execution_skip_reason"] == "execute_paper_not_requested"
     assert db.get_open_trades() == []
+    assert summary["filter_config"]["min_volume_24h"] == c.min_volume_24h
+    assert summary["min_volume_24h"] == c.min_volume_24h
+    assert summary["filter_config"]["min_liquidity"] == c.min_liquidity_dollars
+    assert summary["filter_config"]["max_spread_cents"] == c.max_spread_cents
+    assert summary["filter_config"]["min_yes_price"] == c.min_yes_price
+    assert summary["filter_config"]["max_minutes_to_expiry"] == c.max_minutes_to_expiry
+    assert (
+        summary["filter_config"]["min_orderbook_depth_at_limit"]
+        == c.min_orderbook_depth_at_limit
+    )
+    summaries = [r for r in agent_records(tmp_path) if r.get("stage") == "scan_summary"]
+    assert summaries[-1]["status"] == "success"
+    assert summaries[-1]["fetched_count"] == 1
+    assert summaries[-1]["normalized_count"] == 1
 
 
 def test_execute_paper_inserts_only_paper_trades_when_risk_approved(
@@ -330,3 +353,166 @@ def test_paper_scanner_unwraps_kalshi_market_envelope_and_new_schema(
     assert summary["normalized_markets"] == 1
     assert summary["passed_count"] == 1
     assert summary["paper_trades_inserted"] == 1
+
+
+def test_normalization_exception_is_logged_and_scan_continues(
+    tmp_path,
+    monkeypatch,
+    patched_pipeline,
+):
+    c = cfg(tmp_path)
+    original_normalize = scanner.market_scanner.normalize
+
+    def flaky_normalize(raw):
+        if raw.get("ticker") == "KXBAD-26MAY15":
+            raise ValueError("boom while normalizing")
+        return original_normalize(raw)
+
+    monkeypatch.setattr(scanner.market_scanner, "normalize", flaky_normalize)
+
+    summary = scanner.run_scan(
+        cfg=c,
+        client=FakeKalshiDataClient(
+            [raw_market("KXBAD-26MAY15"), raw_market("KXGOOD-26MAY15")]
+        ),
+        limit=2,
+    )
+
+    assert summary["raw_markets"] == 2
+    assert summary["normalized_markets"] == 2
+    assert summary["normalization_error_count"] == 1
+    records = agent_records(tmp_path)
+    errors = [r for r in records if r.get("stage") == "normalization_error"]
+    assert len(errors) == 1
+    assert errors[0]["ticker"] == "KXBAD-26MAY15"
+    assert "boom while normalizing" in errors[0]["err"]
+    assert "Traceback" in errors[0]["traceback"]
+    assert [r for r in records if r.get("stage") == "normalized" and r.get("ticker") == "KXGOOD-26MAY15"]
+    assert [r for r in records if r.get("stage") == "scan_summary"][-1]["status"] == "partial"
+
+
+def test_every_fetched_market_gets_one_prefilter_or_normalization_followup(
+    tmp_path,
+    patched_pipeline,
+):
+    missing = raw_market("")
+    missing.pop("ticker")
+    sports = raw_market("KXATP-26MAY15")
+
+    scanner.run_scan(
+        cfg=cfg(tmp_path),
+        client=FakeKalshiDataClient(
+            [raw_market("KXGOOD-26MAY15"), missing, sports]
+        ),
+        limit=3,
+    )
+
+    records = agent_records(tmp_path)
+    fetched = [r for r in records if r.get("stage") == "fetched"]
+    followups = [
+        r for r in records
+        if r.get("stage") in {"prefilter_skipped", "normalized", "normalization_error"}
+    ]
+    assert len(fetched) == 3
+    assert len(followups) == 3
+    reasons = {r.get("skip_reason") for r in followups if r.get("stage") == "prefilter_skipped"}
+    assert "prefilter_missing_ticker" in reasons
+    assert any(str(reason).startswith("prefilter_blocked_event_prefix=") for reason in reasons)
+
+
+def test_pipeline_integrity_assertion_logs_and_raises(tmp_path):
+    logger_dir = tmp_path / "logs"
+    import logger as logger_mod
+
+    logger_mod.init(str(logger_dir))
+
+    with pytest.raises(scanner.PipelineIntegrityError):
+        scanner._assert_pipeline_integrity(
+            scan_run_id="scan-x",
+            fetched_count=3,
+            prefilter_skipped_count=1,
+            normalized_count=1,
+        )
+
+    records = agent_records(tmp_path)
+    assert records[-2]["stage"] == "pipeline_integrity_error"
+    assert records[-2]["mismatch"] == 1
+
+
+def test_failed_scan_writes_failed_summary(tmp_path, monkeypatch, patched_pipeline):
+    monkeypatch.setattr(scanner, "_normalize_markets", lambda raw, scan_run_id="": [])
+
+    with pytest.raises(scanner.PipelineIntegrityError):
+        scanner.run_scan(
+            cfg=cfg(tmp_path),
+            client=FakeKalshiDataClient([raw_market("KXGOOD-26MAY15")]),
+            limit=1,
+        )
+
+    summaries = [r for r in agent_records(tmp_path) if r.get("stage") == "scan_summary"]
+    assert summaries[-1]["status"] == "failed"
+    assert summaries[-1]["fetched_count"] == 1
+    assert "count mismatch" in summaries[-1]["error_message"]
+
+
+def test_startup_warns_when_previous_scan_lacked_summary(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "agent.jsonl").write_text(
+        json.dumps(
+            {
+                "stage": "scan_started",
+                "event": "scan_started",
+                "scan_run_id": "scan-old",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    import logger as logger_mod
+
+    logger_mod.init(str(log_dir))
+    scanner._warn_on_previous_incomplete_scan(str(log_dir))
+
+    records = agent_records(tmp_path)
+    assert records[-1]["event"] == "previous_scan_missing_summary"
+    assert records[-1]["scan_run_id"] == "scan-old"
+
+
+def test_startup_warns_when_previous_scan_failed(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "agent.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "stage": "scan_started",
+                        "event": "scan_started",
+                        "scan_run_id": "scan-old",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "stage": "scan_summary",
+                        "event": "scan_summary",
+                        "scan_run_id": "scan-old",
+                        "status": "failed",
+                        "error_message": "boom",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    import logger as logger_mod
+
+    logger_mod.init(str(log_dir))
+    scanner._warn_on_previous_incomplete_scan(str(log_dir))
+
+    records = agent_records(tmp_path)
+    assert records[-1]["event"] == "previous_scan_failed"
+    assert records[-1]["scan_run_id"] == "scan-old"

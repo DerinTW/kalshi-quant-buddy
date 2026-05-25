@@ -204,6 +204,42 @@ def test_llm_failure_does_not_change_p_market(monkeypatch, cfg):
     assert out.yes_probability == pytest.approx(p_market, abs=1e-9)
 
 
+def test_llm_gateway_retries_once_without_rejected_temperature(monkeypatch, cfg):
+    class FakeUsage:
+        output_tokens = 3
+
+    class FakeText:
+        text = '{"ok": true}'
+
+    class FakeResponse:
+        content = [FakeText()]
+        usage = FakeUsage()
+
+    class FakeMessages:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if "temperature" in kwargs:
+                raise TypeError("temperature is deprecated for this model")
+            return FakeResponse()
+
+    class FakeClient:
+        def __init__(self):
+            self.messages = FakeMessages()
+
+    fake = FakeClient()
+    monkeypatch.setattr(llm, "_get_client", lambda c: fake)
+
+    out = llm.call_json(cfg, "Return JSON.", "{}", temperature=0.0)
+
+    assert out == {"ok": True}
+    assert len(fake.messages.calls) == 2
+    assert fake.messages.calls[0]["temperature"] == 0.0
+    assert "temperature" not in fake.messages.calls[1]
+
+
 # ── Rule D: do not invent missing data ───────────────────────────────────────
 
 def test_research_returns_no_items_when_perplexity_unavailable(monkeypatch, cfg):

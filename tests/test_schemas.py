@@ -182,7 +182,7 @@ def test_sentiment_to_spec_dict_keys_unchanged():
     assert set(d.keys()) == {
         "sentiment_score", "narrative_direction", "source_credibility",
         "event_relevance", "market_impact_estimate_cents", "confidence",
-        "contradictions", "rumor_risk",
+        "contradictions", "rumor_risk", "signal_clarity",
     }
     # full dict is JSON-safe too
     json.dumps(s.to_dict())

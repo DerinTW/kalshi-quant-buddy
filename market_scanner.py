@@ -12,6 +12,7 @@ Only completely unparseable records (no ticker) are dropped silently.
 from __future__ import annotations
 import re
 import time
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -25,6 +26,47 @@ _MODULE = "market_scanner"
 _UNKNOWN_TIME = datetime(9999, 12, 31, tzinfo=timezone.utc)
 _STALE_PRICE_HOURS = 6
 _EVENT_SUFFIX = re.compile(r"^[BTbt]?\d")
+_CATEGORY_ALIASES: dict[str, str] = {
+    "climate and weather": "weather",
+    "climate": "weather",
+    "weather": "weather",
+    "economics": "economic",
+    "economic": "economic",
+    "financials": "financial",
+    "financial": "financial",
+    "finance": "financial",
+    "crypto": "crypto",
+    "cryptocurrency": "crypto",
+    "commodities": "commodities",
+    "commodity": "commodities",
+    "science and technology": "science and technology",
+    "science & technology": "science and technology",
+    "science": "science and technology",
+    "technology": "science and technology",
+    "tech": "science and technology",
+    "tech and science": "science and technology",
+    "tech & science": "science and technology",
+    "culture": "culture",
+    "entertainment": "culture",
+}
+_SPORTS_TITLE_WORDS = (
+    " nba ",
+    " wnba ",
+    " nfl ",
+    " nhl ",
+    " mlb ",
+    " mls ",
+    " ufc ",
+    " atp ",
+    " wta ",
+    " tennis ",
+    " soccer ",
+    " basketball ",
+    " football ",
+    " baseball ",
+    " hockey ",
+    " golf ",
+)
 
 
 # ── Event ticker derivation ───────────────────────────────────────────────────
@@ -39,6 +81,68 @@ def _derive_event_ticker(ticker: str) -> str:
     if len(parts) >= 2 and _EVENT_SUFFIX.match(parts[-1]):
         return "-".join(parts[:-1])
     return ticker
+
+
+def _normalize_category(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return _CATEGORY_ALIASES.get(text, text)
+
+
+def _raw_event_key(raw: dict[str, Any]) -> str:
+    event = str(raw.get("event_ticker") or raw.get("series_ticker") or "").strip()
+    if event:
+        return event
+    ticker = str(raw.get("ticker") or "").strip()
+    return _derive_event_ticker(ticker) if ticker else ""
+
+
+def _title_looks_like_sports(raw: dict[str, Any]) -> bool:
+    title = f" {raw.get('title') or raw.get('subtitle') or ''} ".lower()
+    return any(word in title for word in _SPORTS_TITLE_WORDS)
+
+
+def prefilter_raw_market(raw: dict[str, Any], cfg: Config) -> Optional[str]:
+    """
+    Cheap raw-market gate before normalization and enrichment.
+
+    Uses fields already present in the market list response so blocked
+    categories and obvious sports event families do not consume orderbook,
+    history, research, or LLM budget.
+    """
+    event_key = _raw_event_key(raw).upper()
+    ticker = str(raw.get("ticker") or "").strip().upper()
+    status = _normalize_status(raw.get("status"))
+    if status and status != "open":
+        return f"prefilter_inactive_status={status}"
+
+    missing_fields: list[str] = []
+    if not (raw.get("title") or raw.get("subtitle")):
+        missing_fields.append("title")
+    if not (raw.get("rules_primary") or raw.get("description")):
+        missing_fields.append("rules_primary")
+    if not (raw.get("category") or raw.get("event_category")):
+        missing_fields.append("category")
+    if missing_fields:
+        return "prefilter_missing_required_fields=" + ",".join(missing_fields)
+
+    for prefix in getattr(cfg, "blocked_event_prefixes", []) or []:
+        normalized_prefix = str(prefix or "").strip().upper()
+        if not normalized_prefix:
+            continue
+        if event_key.startswith(normalized_prefix) or ticker.startswith(normalized_prefix):
+            return f"prefilter_blocked_event_prefix={normalized_prefix}"
+
+    raw_category = raw.get("category") or raw.get("event_category")
+    category = _normalize_category(raw_category)
+    if cfg.category_allowlist and category:
+        allowed = {_normalize_category(item) for item in cfg.category_allowlist}
+        if category not in allowed:
+            return f"prefilter_category_not_allowed={category}"
+
+    if not category and _title_looks_like_sports(raw):
+        return "prefilter_category_not_allowed=sports_title_fallback"
+
+    return None
 
 
 # ── Time parsing ──────────────────────────────────────────────────────────────
@@ -120,10 +224,11 @@ def _validate(market: Market) -> Market:
     has_no = market.no_ask > 0 and market.no_bid >= 0
     if not has_yes and not has_no:
         return _unsafe(market, "no_usable_bid_ask")
-    if market.yes_ask > 0 and market.no_ask > 0:
-        price_sum = market.yes_ask + market.no_ask
-        if price_sum < 95 or price_sum > 105:
-            return _unsafe(market, f"price_sum_anomaly (yes+no={price_sum})")
+    if market.yes_ask > 0 and market.no_ask > 0 and market.yes_bid >= 0 and market.no_bid >= 0:
+        # yes_mid + no_mid should be ~100. Asks alone always exceed 100 by the spread.
+        mid_sum = (market.yes_ask + market.yes_bid + market.no_ask + market.no_bid) / 2
+        if mid_sum < 95 or mid_sum > 105:
+            return _unsafe(market, f"price_sum_anomaly (mid_sum={mid_sum:.0f})")
     if not market.category:
         return _unsafe(market, "missing_category")
     return market
@@ -246,24 +351,16 @@ def enrich_with_orderbook_depth(
 ) -> None:
     """
     Fetch the live orderbook for each market and compute top-of-book depth.
-    Depth = total contracts available at the single best ask price (YES side).
-    Sets market.orderbook_depth in-place. Best-effort — failures leave depth=0.
+    Depth = max contracts available at the best YES-bid / implied-YES-ask.
+    Kalshi REST orderbooks return bids only: a NO bid is the executable YES
+    ask. Sets market.orderbook_depth in-place. Best-effort; failures leave the
+    previous depth and orderbook_depth_fetched=False.
     Call AFTER the structural filter pass so we only hit the API for candidates.
     """
     for i, market in enumerate(markets):
         try:
             ob_data = client.get_orderbook(market.ticker, depth=depth)
-            ob = ob_data.get("orderbook", ob_data)
-            asks = ob.get("yes", {}).get("ask", []) or ob.get("yes", {}).get("asks", [])
-            if asks:
-                best_price = asks[0][0]
-                market.orderbook_depth = sum(
-                    int(size) for price, size in asks if price == best_price
-                )
-            else:
-                market.orderbook_depth = 0
-            # Mark fetched even when the book was empty — the filter needs to
-            # distinguish "we didn't ask" from "we asked, book was thin/empty".
+            market.orderbook_depth = _parse_orderbook_top_depth(ob_data)
             market.orderbook_depth_fetched = True
         except Exception as exc:
             code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -277,6 +374,116 @@ def enrich_with_orderbook_depth(
 
         if delay_seconds > 0 and i < len(markets) - 1:
             time.sleep(delay_seconds)
+
+
+def _parse_orderbook_top_depth(raw: Any) -> int:
+    """
+    Parse Kalshi orderbook depth across current and legacy response shapes.
+
+    Current REST shape:
+      {"orderbook_fp": {"yes_dollars": [["0.4200", "13.00"]],
+                        "no_dollars":  [["0.5600", "17.00"]]}}
+    The arrays are bid levels sorted ascending, so the best bid is last. Since
+    a NO bid is an executable YES ask, generic tradable depth is the larger of
+    the best YES-bid and best NO-bid quantities.
+
+    Legacy/test shapes with explicit yes/no bid/ask arrays are still accepted.
+    If the payload has no recognizable orderbook container, raise so callers do
+    not incorrectly mark depth as fetched.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("orderbook_response_not_object")
+
+    if isinstance(raw.get("orderbook_fp"), dict):
+        ob_fp = raw["orderbook_fp"]
+        return max(
+            _best_level_depth(ob_fp.get("yes_dollars"), best_at_end=True),
+            _best_level_depth(ob_fp.get("no_dollars"), best_at_end=True),
+        )
+
+    ob = raw.get("orderbook", raw)
+    if not isinstance(ob, dict):
+        raise ValueError("orderbook_container_not_object")
+
+    yes = ob.get("yes")
+    no = ob.get("no")
+    if isinstance(yes, list) or isinstance(no, list):
+        return max(
+            _best_level_depth(yes, best_at_end=True),
+            _best_level_depth(no, best_at_end=True),
+        )
+
+    if isinstance(yes, dict) or isinstance(no, dict):
+        yes_dict = yes if isinstance(yes, dict) else {}
+        no_dict = no if isinstance(no, dict) else {}
+        return max(
+            _best_level_depth(
+                yes_dict.get("ask") or yes_dict.get("asks") or yes_dict.get("bid") or yes_dict.get("bids"),
+                best_at_end=False,
+            ),
+            _best_level_depth(
+                no_dict.get("bid") or no_dict.get("bids") or no_dict.get("ask") or no_dict.get("asks"),
+                best_at_end=False,
+            ),
+        )
+
+    if "orderbook" in raw:
+        raise ValueError("orderbook_sides_unrecognized")
+    raise ValueError("orderbook_container_missing")
+
+
+def _best_level_depth(levels: Any, *, best_at_end: bool) -> int:
+    if levels is None:
+        return 0
+    if not isinstance(levels, list):
+        raise ValueError("orderbook_levels_not_list")
+    if not levels:
+        return 0
+
+    best = levels[-1] if best_at_end else levels[0]
+    price = _level_price(best)
+    total = Decimal("0")
+    for level in levels:
+        if _level_price(level) == price:
+            total += _level_size(level)
+    return int(total)
+
+
+def _level_price(level: Any) -> Decimal:
+    if isinstance(level, dict):
+        value = (
+            level.get("price")
+            or level.get("price_dollars")
+            or level.get("yes_price")
+            or level.get("no_price")
+        )
+    elif isinstance(level, (list, tuple)) and len(level) >= 1:
+        value = level[0]
+    else:
+        raise ValueError("orderbook_level_unrecognized")
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("orderbook_price_unparseable") from exc
+
+
+def _level_size(level: Any) -> Decimal:
+    if isinstance(level, dict):
+        value = (
+            level.get("count")
+            or level.get("count_fp")
+            or level.get("size")
+            or level.get("quantity")
+            or level.get("contracts")
+        )
+    elif isinstance(level, (list, tuple)) and len(level) >= 2:
+        value = level[1]
+    else:
+        raise ValueError("orderbook_level_unrecognized")
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("orderbook_size_unparseable") from exc
 
 
 # ── History enrichment (post-filter, not during bulk scan) ────────────────────
@@ -415,6 +622,8 @@ def scan(client: KalshiClient, cfg: Config, status: str = "open") -> list[Market
     seen: set[str] = set()
     markets: list[Market] = []
     hard_skipped = 0
+    prefilter_skipped = 0
+    prefilter_reasons: dict[str, int] = {}
     unsafe_count = 0
 
     for raw in raw_list:
@@ -423,6 +632,19 @@ def scan(client: KalshiClient, cfg: Config, status: str = "open") -> list[Market
             hard_skipped += 1
             continue
         seen.add(ticker)
+
+        prefilter_reason = prefilter_raw_market(raw, cfg)
+        if prefilter_reason is not None:
+            prefilter_skipped += 1
+            prefilter_reasons[prefilter_reason] = prefilter_reasons.get(prefilter_reason, 0) + 1
+            logger.debug(
+                _MODULE,
+                "prefilter_market_skipped",
+                ticker=ticker,
+                event_ticker=_raw_event_key(raw),
+                reason=prefilter_reason,
+            )
+            continue
 
         m = normalize(raw)
         if m is None:
@@ -439,7 +661,8 @@ def scan(client: KalshiClient, cfg: Config, status: str = "open") -> list[Market
     safe_count = len(markets) - unsafe_count
     logger.info(
         _MODULE, "scan_done",
-        f"total={len(markets)}  safe={safe_count}  unsafe={unsafe_count}  skipped={hard_skipped}",
+        f"total={len(markets)}  safe={safe_count}  unsafe={unsafe_count}  skipped={hard_skipped}  prefilter_skipped={prefilter_skipped}",
+        prefilter_skip_counts=prefilter_reasons,
     )
     if unsafe_count > 0:
         logger.warn(_MODULE, "unsafe_summary",

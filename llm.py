@@ -47,7 +47,7 @@ tests/test_llm_role.py if a new caller is permitted to import this module.
 from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 import json
-from typing import Any
+from typing import Any, Optional
 
 import anthropic
 
@@ -75,20 +75,46 @@ def call(
     user: str,
     *,
     max_tokens: int = 1024,
-    temperature: float = 0.2,
+    temperature: Optional[float] = 0.2,
 ) -> str:
     """Single-turn LLM call. Returns the text content of the first response block."""
     client = _get_client(cfg)
-    response = client.messages.create(
-        model=cfg.anthropic_model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
+    params = {
+        "model": cfg.anthropic_model,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+    }
+    if temperature is not None:
+        params["temperature"] = temperature
+    try:
+        response = client.messages.create(**params)
+    except Exception as exc:
+        if temperature is None or not _is_temperature_rejected(exc):
+            raise
+        logger.warn(
+            _MODULE,
+            "temperature_rejected_retrying_without_temperature",
+            model=cfg.anthropic_model,
+            err=str(exc),
+        )
+        params.pop("temperature", None)
+        response = client.messages.create(**params)
     text = response.content[0].text if response.content else ""
     logger.debug(_MODULE, "llm_call", tokens_used=response.usage.output_tokens)
     return text
+
+
+def _is_temperature_rejected(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "temperature" in text and (
+        "deprecated" in text
+        or "not supported" in text
+        or "unsupported" in text
+        or "unexpected" in text
+        or "invalid" in text
+        or "extra inputs are not permitted" in text
+    )
 
 
 def call_json(
@@ -97,7 +123,7 @@ def call_json(
     user: str,
     *,
     max_tokens: int = 1024,
-    temperature: float = 0.1,
+    temperature: Optional[float] = 0.1,
 ) -> dict[str, Any]:
     """
     Call the LLM and parse the response as JSON.
@@ -1116,7 +1142,13 @@ def run_probability_estimator(
     )
 
     try:
-        raw = call_json(cfg, _PROBABILITY_ESTIMATOR_SYSTEM, user, max_tokens=1000)
+        raw = call_json(
+            cfg,
+            _PROBABILITY_ESTIMATOR_SYSTEM,
+            user,
+            max_tokens=1000,
+            temperature=None,
+        )
     except Exception as exc:
         logger.error(_MODULE, "probability_estimator_failed",
                      ticker=ticker, err=str(exc))

@@ -33,6 +33,10 @@ def _max_minutes_to_expiry_default() -> int:
     return _env_int(("MAX_MINUTES_TO_EXPIRY",), "4320")
 
 
+def _env_csv(name: str, default: str) -> list[str]:
+    return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
+
+
 @dataclass
 class Config:
     # Kalshi API
@@ -78,7 +82,7 @@ class Config:
     max_spread_pct: float = field(default_factory=lambda: float(os.getenv("MAX_SPREAD_PCT", "20")))
     min_minutes_to_expiry: int = field(default_factory=lambda: _env_int(("MIN_MINUTES_TO_EXPIRY", "MIN_TIME_TO_RESOLUTION_MINUTES"), "20"))
     max_minutes_to_expiry: int = field(default_factory=_max_minutes_to_expiry_default)
-    min_volume_24h: int = field(default_factory=lambda: _env_int(("MIN_VOLUME_24H", "MIN_VOLUME"), "500"))
+    min_volume_24h: int = field(default_factory=lambda: _env_int(("MIN_VOLUME_24H", "MIN_VOLUME"), "1000"))
     min_yes_price: int = field(default_factory=lambda: int(os.getenv("MIN_YES_PRICE", "15")))
     max_yes_price: int = field(default_factory=lambda: int(os.getenv("MAX_YES_PRICE", "85")))
     # Absolute spread cap in cents (yes_ask - yes_bid); separate from the pct check
@@ -91,7 +95,12 @@ class Config:
     # politics is intentionally omitted from the default (too noisy / regulatory risk)
     category_allowlist: list[str] = field(
         default_factory=lambda: [
-            c.strip() for c in os.getenv("CATEGORY_ALLOWLIST", "crypto,economic,financial,weather").split(",") if c.strip()
+            c.strip()
+            for c in os.getenv(
+                "CATEGORY_ALLOWLIST",
+                "crypto,financial,economic,commodities,weather,science and technology,culture",
+            ).split(",")
+            if c.strip()
         ]
     )
     # Optional fetch cap for smoke tests/manual runs. None means full scan.
@@ -107,6 +116,12 @@ class Config:
         default_factory=lambda: {
             t.strip() for t in os.getenv("BLOCKED_TICKERS", "").split(",") if t.strip()
         }
+    )
+    blocked_event_prefixes: list[str] = field(
+        default_factory=lambda: _env_csv(
+            "BLOCKED_EVENT_PREFIXES",
+            "KXATP,KXWTA,KXWNBA,KXNBA,KXNFL,KXNHL,KXMLB,KXUFC,KXPGA,KXNCAAF,KXNCAAB,KXMLS",
+        )
     )
 
     # Anomaly detection

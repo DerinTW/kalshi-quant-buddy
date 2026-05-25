@@ -1,11 +1,12 @@
 from __future__ import annotations
-from typing import Optional
+from typing import Any, Optional
 
 import features
 import llm
 import logger
 from config import Config
 from models import (
+    BaseRateSignal,
     FeatureVector,
     Market,
     ProbabilityEstimate,
@@ -30,6 +31,8 @@ CONFIDENCE_WEIGHTS: dict[str, float] = {
 _W_MARKET   = 0.70    # market mid-price (0.55 base + 0.15 historical fallback)
 _W_RESEARCH = 0.25    # sentiment-adjusted price
 _W_LLM      = 0.05    # LLM reasoning, capped ±10pp from market
+_W_BASE_RATE = 0.10
+_W_MARKET_WITH_BASE_RATE = _W_MARKET - _W_BASE_RATE
 
 # Defensive cap on sentiment-driven shift, regardless of upstream caps.
 _SENTIMENT_SHIFT_CAP_PP = 0.10     # ±10pp
@@ -96,6 +99,7 @@ def estimate(
     *,
     spot_price: Optional[float] = None,
     markets_by_event: Optional[dict[str, list[Market]]] = None,
+    base_rate_signal: Optional[BaseRateSignal] = None,
 ) -> ProbabilityEstimate:
     """
     Estimate the true probability of YES using an ensemble of:
@@ -119,6 +123,7 @@ def estimate(
             market, research, sentiment, weird_move, cfg,
             spot_price=spot_price,
             markets_by_event=markets_by_event,
+            base_rate_signal=base_rate_signal,
         )
     except Exception as exc:
         logger.error(_MODULE, "estimate_failed",
@@ -135,6 +140,7 @@ def _estimate_impl(
     *,
     spot_price: Optional[float],
     markets_by_event: Optional[dict[str, list[Market]]],
+    base_rate_signal: Optional[BaseRateSignal],
 ) -> ProbabilityEstimate:
     # ── Build the feature vector (fail-soft over None inputs) ────────────
     fv: FeatureVector = features.extract_features(
@@ -154,22 +160,57 @@ def _estimate_impl(
     p_llm, llm_confidence, reasoning, assumptions, invalidations = _llm_component(
         market, research, sentiment, weird_move, cfg, p_market
     )
+    p_base, base_rate_used, base_rate_reason = _base_rate_component(base_rate_signal)
 
     # ── Ensemble blend ───────────────────────────────────────────────────
-    p_model = _clamp(
-        _W_MARKET   * p_market
-        + _W_RESEARCH * p_research
-        + _W_LLM      * p_llm
-    )
+    if base_rate_used and p_base is not None:
+        p_model = _clamp(
+            _W_MARKET_WITH_BASE_RATE * p_market
+            + _W_RESEARCH * p_research
+            + _W_LLM * p_llm
+            + _W_BASE_RATE * p_base
+        )
+    else:
+        p_model = _clamp(
+            _W_MARKET   * p_market
+            + _W_RESEARCH * p_research
+            + _W_LLM      * p_llm
+        )
 
     # ── Rule-layer confidence step-downs ─────────────────────────────────
+    breakdown: dict[str, Any] = {
+        "initial_confidence": llm_confidence,
+        "initial_confidence_score": confidence_weight(llm_confidence),
+        "source_credibility_contribution": (
+            getattr(sentiment, "source_credibility", 0.0) if sentiment else 0.0
+        ),
+        "event_relevance_contribution": (
+            getattr(sentiment, "event_relevance", 0.0) if sentiment else 0.0
+        ),
+        "signal_clarity": _research_signal_clarity(research, sentiment),
+        "contradiction_penalty": 0,
+        "market_structure_penalties": [],
+        "floor_applied": "",
+        "base_rate": base_rate_signal.to_dict() if base_rate_signal else None,
+        "base_rate_reason": base_rate_reason,
+    }
     confidence = llm_confidence
-    confidence = _apply_microstructure_stepdowns(market, confidence)
-    confidence = _apply_feature_stepdowns(fv, p_model, market, confidence)
-    confidence = _apply_weird_move_stepdowns(weird_move, confidence, market.ticker)
+    confidence = _apply_microstructure_stepdowns(market, confidence, breakdown)
+    confidence = _apply_feature_stepdowns(fv, p_model, market, confidence, breakdown)
+    confidence = _apply_weird_move_stepdowns(weird_move, confidence, market.ticker, breakdown)
     confidence = _apply_sentiment_research_stepdowns(
-        sentiment, research, confidence, market.ticker
+        sentiment, research, confidence, market.ticker, breakdown
     )
+    confidence = _apply_confidence_floors(
+        confidence=confidence,
+        p_market=p_market,
+        research=research,
+        sentiment=sentiment,
+        base_rate_signal=base_rate_signal,
+        breakdown=breakdown,
+    )
+    breakdown["final_confidence"] = confidence
+    breakdown["final_confidence_score"] = confidence_weight(confidence)
 
     result = ProbabilityEstimate(
         ticker=market.ticker,
@@ -178,6 +219,8 @@ def _estimate_impl(
         reasoning=reasoning,
         assumptions=assumptions,
         invalidation_conditions=invalidations,
+        confidence_breakdown=breakdown,
+        base_rate_signal=base_rate_signal,
     )
 
     logger.info(
@@ -187,13 +230,28 @@ def _estimate_impl(
         p_market=f"{p_market:.1%}",
         p_research=f"{p_research:.1%}",
         p_llm=f"{p_llm:.1%}",
+        p_base=(f"{p_base:.1%}" if p_base is not None else None),
+        base_rate_used=base_rate_used,
         market_ask=f"{market.yes_ask}¢",
         confidence=confidence,
         sentiment_shift=f"{sentiment_shift:+.3f}",
         hist_vol=f"{fv.historical_volatility:.2f}",
         siblings=len(fv.related_market_prices),
     )
+    logger.audit(_MODULE, "confidence_breakdown", ticker=market.ticker, **breakdown)
     return result
+
+
+def _base_rate_component(
+    signal: Optional[BaseRateSignal],
+) -> tuple[Optional[float], bool, str]:
+    if signal is None:
+        return None, False, "historical_base_rate_not_requested"
+    if not signal.available or signal.historical_base_rate is None:
+        return None, False, "historical_base_rate_unavailable"
+    if signal.confidence <= 0:
+        return None, False, "historical_base_rate_zero_confidence"
+    return _clamp(float(signal.historical_base_rate)), True, "historical_base_rate_used"
 
 
 # ── LLM component ────────────────────────────────────────────────────────────
@@ -267,18 +325,28 @@ def _llm_component(
 
 # ── Confidence step-down rules ───────────────────────────────────────────────
 
-def _apply_microstructure_stepdowns(market: Market, confidence: str) -> str:
+def _apply_microstructure_stepdowns(
+    market: Market,
+    confidence: str,
+    breakdown: Optional[dict[str, Any]] = None,
+) -> str:
     """Liquidity, time-to-resolution, and history-depth gates."""
     if market.liquidity_dollars < _THIN_LIQUIDITY_USD:
         confidence = _step_down(confidence)
+        if breakdown is not None:
+            breakdown["market_structure_penalties"].append("thin_liquidity")
         logger.debug(_MODULE, "thin_liquidity", ticker=market.ticker,
                      liquidity_usd=market.liquidity_dollars)
     if market.minutes_to_settlement < _NEAR_RESOLUTION_MIN:
         confidence = _step_down(confidence)
+        if breakdown is not None:
+            breakdown["market_structure_penalties"].append("near_resolution")
         logger.debug(_MODULE, "near_resolution", ticker=market.ticker,
                      minutes_to_settlement=market.minutes_to_settlement)
     if len(market.price_history) < _SPARSE_HISTORY_TICKS:
         confidence = _step_down(confidence)
+        if breakdown is not None:
+            breakdown["market_structure_penalties"].append("sparse_history")
         logger.debug(_MODULE, "sparse_history", ticker=market.ticker,
                      ticks=len(market.price_history))
     return confidence
@@ -289,10 +357,13 @@ def _apply_feature_stepdowns(
     p_model: float,
     market: Market,
     confidence: str,
+    breakdown: Optional[dict[str, Any]] = None,
 ) -> str:
     """Step down on high historical volatility and sibling disagreement."""
     if fv.historical_volatility > _HIGH_VOLATILITY_CENTS:
         confidence = _step_down(confidence)
+        if breakdown is not None:
+            breakdown["market_structure_penalties"].append("high_volatility")
         logger.debug(_MODULE, "high_volatility", ticker=market.ticker,
                      hist_vol=f"{fv.historical_volatility:.2f}")
 
@@ -304,6 +375,8 @@ def _apply_feature_stepdowns(
         disagreement = abs(p_model - neighbor_mean)
         if disagreement > _NEIGHBOR_DISAGREE_PROB:
             confidence = _step_down(confidence)
+            if breakdown is not None:
+                breakdown["market_structure_penalties"].append("neighbor_disagreement")
             logger.debug(_MODULE, "neighbor_disagreement",
                          ticker=market.ticker,
                          disagreement=f"{disagreement:.2f}",
@@ -317,6 +390,7 @@ def _apply_sentiment_research_stepdowns(
     research: Optional[ResearchResult],
     confidence: str,
     ticker: str,
+    breakdown: Optional[dict[str, Any]] = None,
 ) -> str:
     """
     Step down confidence based on signals the probability-estimator spec
@@ -329,11 +403,15 @@ def _apply_sentiment_research_stepdowns(
     # callers that pre-aggregate, so the sentiment view is the right signal.
     if sentiment is None:
         confidence = _step_down(confidence)
+        if breakdown is not None:
+            breakdown["market_structure_penalties"].append("missing_sentiment")
         logger.debug(_MODULE, "missing_sentiment_stepdown", ticker=ticker)
         return confidence
 
     if getattr(sentiment, "item_count", 0) == 0:
         confidence = _step_down(confidence)
+        if breakdown is not None:
+            breakdown["market_structure_penalties"].append("missing_research")
         logger.debug(_MODULE, "missing_research_stepdown", ticker=ticker)
 
     # Rumor risk medium/high — social/unverified signal cannot anchor
@@ -341,12 +419,16 @@ def _apply_sentiment_research_stepdowns(
     # the LLM cannot relax it).
     if sentiment.rumor_risk in ("medium", "high"):
         confidence = _step_down(confidence)
+        if breakdown is not None:
+            breakdown["market_structure_penalties"].append(f"rumor_risk_{sentiment.rumor_risk}")
         logger.debug(_MODULE, "rumor_risk_stepdown",
                      ticker=ticker, rumor_risk=sentiment.rumor_risk)
 
     # Conflicting evidence
     if sentiment.major_contradictions:
         confidence = _step_down(confidence)
+        if breakdown is not None:
+            breakdown["contradiction_penalty"] = len(sentiment.major_contradictions)
         logger.debug(_MODULE, "contradictions_stepdown",
                      ticker=ticker,
                      contradictions=len(sentiment.major_contradictions))
@@ -358,6 +440,7 @@ def _apply_weird_move_stepdowns(
     weird_move: Optional[WeirdMoveSignal],
     confidence: str,
     ticker: str,
+    breakdown: Optional[dict[str, Any]] = None,
 ) -> str:
     """
     Weird-move signals are *confidence modifiers*, not directional inputs.
@@ -368,6 +451,10 @@ def _apply_weird_move_stepdowns(
     steps = _WEIRD_MOVE_STEPS.get(weird_move.classification, 0)
     if steps > 0:
         new_conf = _step_down(confidence, steps)
+        if breakdown is not None:
+            breakdown["market_structure_penalties"].append(
+                f"weird_move_{weird_move.classification}"
+            )
         logger.debug(_MODULE, "weird_move_stepdown",
                      ticker=ticker,
                      classification=weird_move.classification,
@@ -378,6 +465,77 @@ def _apply_weird_move_stepdowns(
 
 
 # ── Fallback ─────────────────────────────────────────────────────────────────
+
+def _research_signal_clarity(
+    research: Optional[ResearchResult],
+    sentiment: Optional[SentimentResult],
+) -> str:
+    if sentiment is not None and getattr(sentiment, "signal_clarity", "low") != "low":
+        return sentiment.signal_clarity
+    if research is not None:
+        return getattr(research, "signal_clarity", "low")
+    return "low"
+
+
+def _has_clear_official_signal(
+    research: Optional[ResearchResult],
+    sentiment: Optional[SentimentResult],
+) -> bool:
+    if research is None:
+        return False
+    if _research_signal_clarity(research, sentiment) != "high":
+        return False
+    yes = any(
+        item.direction == "supports_yes"
+        and item.credibility >= 0.90
+        and item.relevance >= 0.70
+        for item in research.items
+    )
+    no = any(
+        item.direction == "supports_no"
+        and item.credibility >= 0.90
+        and item.relevance >= 0.70
+        for item in research.items
+    )
+    if yes and no:
+        return False
+    return yes or no
+
+
+def _apply_confidence_floors(
+    *,
+    confidence: str,
+    p_market: float,
+    research: Optional[ResearchResult],
+    sentiment: Optional[SentimentResult],
+    base_rate_signal: Optional[BaseRateSignal],
+    breakdown: dict[str, Any],
+) -> str:
+    floor = 0.0
+    reason = ""
+    if _has_clear_official_signal(research, sentiment):
+        floor = 0.50
+        reason = "official_clear_directional_signal"
+
+    if (
+        base_rate_signal is not None
+        and base_rate_signal.available
+        and base_rate_signal.historical_base_rate is not None
+        and abs(float(base_rate_signal.historical_base_rate) - p_market) > 0.20
+    ):
+        floor = max(floor, 0.55)
+        reason = "historical_base_rate_diverges_from_market"
+
+    if floor <= 0 or confidence_weight(confidence) >= floor:
+        return confidence
+
+    for label in _CONF_ORDER:
+        if confidence_weight(label) >= floor:
+            breakdown["floor_applied"] = reason
+            breakdown["floor_value"] = floor
+            return label
+    return confidence
+
 
 def _fallback(market: Market) -> ProbabilityEstimate:
     """Low-confidence estimate equal to the market midpoint."""
@@ -408,6 +566,7 @@ def batch_estimate(
     *,
     spot_prices: Optional[dict[str, float]] = None,
     markets_by_event: Optional[dict[str, list[Market]]] = None,
+    base_rate_map: Optional[dict[str, BaseRateSignal]] = None,
 ) -> dict[str, ProbabilityEstimate]:
     """Estimate probability for a batch of markets. Returns ticker → ProbabilityEstimate."""
     if markets_by_event is None:
@@ -417,6 +576,7 @@ def batch_estimate(
             markets_by_event.setdefault(key, []).append(m)
 
     spot_prices = spot_prices or {}
+    base_rate_map = base_rate_map or {}
     results: dict[str, ProbabilityEstimate] = {}
 
     for market in markets:
@@ -437,6 +597,7 @@ def batch_estimate(
                 market, research, sent, weird, cfg,
                 spot_price=spot_prices.get(market.ticker),
                 markets_by_event=markets_by_event,
+                base_rate_signal=base_rate_map.get(market.ticker),
             )
         except Exception as exc:
             logger.error(_MODULE, "batch_estimate_failed",

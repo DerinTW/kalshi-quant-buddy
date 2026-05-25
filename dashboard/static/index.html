@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Black Gibbie Paper Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Paper observability</p>
+          <h1>Black Gibbie Dashboard</h1>
+        </div>
+        <nav class="exports" aria-label="Exports">
+          <a id="export-audit" href="/api/export/audit.csv">Audit CSV</a>
+          <a id="export-skips" href="/api/export/skip-reasons.csv">Skip CSV</a>
+          <a href="/api/export/latest-scan.json">Latest JSON</a>
+        </nav>
+      </header>
+
+      <section class="metric-grid" aria-label="Overview metrics">
+        <article class="metric"><span>Raw</span><strong id="raw-markets">0</strong></article>
+        <article class="metric"><span>Normalized</span><strong id="normalized-markets">0</strong></article>
+        <article class="metric"><span>Passed</span><strong id="passed-count">0</strong></article>
+        <article class="metric"><span>Skipped</span><strong id="rejected-count">0</strong></article>
+        <article class="metric"><span>Pass Rate</span><strong id="pass-rate">0%</strong></article>
+        <article class="metric"><span>Analyzed</span><strong id="candidates-analyzed">0</strong></article>
+        <article class="metric"><span>Paper Inserts</span><strong id="paper-inserts">0</strong></article>
+        <article class="metric"><span>Open Exposure</span><strong id="open-exposure">$0.00</strong></article>
+        <article class="metric"><span>Paper P&L</span><strong id="paper-pnl">$0.00</strong></article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Filters</p>
+            <h2>Skip Reasons</h2>
+          </div>
+          <span id="latest-run-label" class="badge">No scan runs</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Reason</th><th class="numeric">Count</th><th>Examples</th></tr>
+            </thead>
+            <tbody id="skip-reasons-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Market trail</p>
+            <h2>Audit Table</h2>
+          </div>
+          <button id="refresh" type="button">Refresh</button>
+        </div>
+        <form id="filters" class="filters">
+          <label>Scan run<select id="scan-run"></select></label>
+          <label>Outcome<select id="outcome">
+            <option value="">All</option>
+            <option value="skipped">Skipped</option>
+            <option value="passed">Passed</option>
+            <option value="no_trade">No trade</option>
+            <option value="trade">Trade</option>
+            <option value="error">Error</option>
+          </select></label>
+          <label>Stage<select id="stage">
+            <option value="">All</option>
+            <option value="fetched">Fetched</option>
+            <option value="normalized">Normalized</option>
+            <option value="filter_passed">Filter passed</option>
+            <option value="filter_skipped">Filter skipped</option>
+            <option value="analyzed">Analyzed</option>
+            <option value="no_trade">No trade</option>
+            <option value="risk_rejected">Risk rejected</option>
+            <option value="paper_trade_opened">Paper trade opened</option>
+            <option value="error">Error</option>
+          </select></label>
+          <label>Category<input id="category" type="search" placeholder="crypto" /></label>
+          <label>Ticker<input id="ticker" type="search" placeholder="KX..." /></label>
+          <label>Skip reason<input id="skip-reason" type="search" placeholder="yes_ask" /></label>
+          <label>Min liquidity<input id="min-liquidity" type="number" min="0" step="1" /></label>
+          <label>Max spread<input id="max-spread" type="number" min="0" step="1" /></label>
+          <label>Min minutes<input id="min-minutes" type="number" min="0" step="1" /></label>
+          <label>Max minutes<input id="max-minutes" type="number" min="0" step="1" /></label>
+        </form>
+        <div class="table-wrap wide">
+          <table>
+            <thead>
+              <tr>
+                <th>Timestamp</th><th>Ticker</th><th>Title</th><th>Category</th>
+                <th>Stage</th><th>Outcome</th><th>Skip Reason</th>
+                <th class="numeric">Bid/Ask</th><th class="numeric">Spread</th>
+                <th class="numeric">Vol 24h</th><th class="numeric">Liquidity</th>
+                <th class="numeric">Min Close</th><th class="numeric">Edge</th>
+                <th class="numeric">Conf</th><th>Decision</th><th>Risk</th>
+              </tr>
+            </thead>
+            <tbody id="audit-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Ledger</p>
+            <h2>Paper Trades</h2>
+          </div>
+          <span id="trade-count" class="badge">0 trades</span>
+        </div>
+        <div class="table-wrap wide">
+          <table>
+            <thead>
+              <tr>
+                <th>Ticker</th><th>Side</th><th class="numeric">Contracts</th>
+                <th class="numeric">Entry</th><th class="numeric">At Risk</th>
+                <th class="numeric">Est Yes</th><th>Opened</th><th>Result</th>
+                <th class="numeric">Exit</th><th class="numeric">P&L</th><th>Thesis</th>
+              </tr>
+            </thead>
+            <tbody id="trades-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

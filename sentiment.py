@@ -64,6 +64,8 @@ _IMPACT_SCALE             = 25    # raw scale before capping
 _CONF_CAP_HIGH_RUMOR   = 0.40
 _CONF_CAP_MEDIUM_RUMOR = 0.65
 _CONF_PENALTY_PER_CONTRADICTION = 0.08
+_OFFICIAL_CLEAR_CONFIDENCE_FLOOR = 0.50
+_OFFICIAL_CLEAR_SOCIAL_CONTRADICTION_FLOOR = 0.45
 
 # Threshold of "meaningful" weight share for mixed/override detection
 _MIN_TIER_WEIGHT_SHARE = 0.20
@@ -223,6 +225,65 @@ def _is_mixed(items: list[ResearchItem], signal: float) -> bool:
     return False
 
 
+def _signal_clarity(
+    items: list[ResearchItem],
+    signal: float,
+    contradictions: list[str],
+) -> str:
+    directional = [i for i in items if i.direction in ("supports_yes", "supports_no")]
+    if not directional:
+        return "low"
+
+    clear_official = [
+        i for i in directional
+        if i.credibility >= 0.90 and i.relevance >= 0.70 and i.recency_score >= 0.50
+    ]
+    high_cred_yes = [i for i in clear_official if i.direction == "supports_yes"]
+    high_cred_no = [i for i in clear_official if i.direction == "supports_no"]
+    if clear_official and not (high_cred_yes and high_cred_no):
+        official_direction = "supports_yes" if high_cred_yes else "supports_no"
+        if abs(signal) >= 0.35 or _has_only_low_cred_opposition(items, official_direction):
+            return "high"
+    if abs(signal) >= 0.15 or contradictions:
+        return "medium"
+    return "low"
+
+
+def _clear_official_direction(items: list[ResearchItem]) -> str:
+    yes = any(
+        item.direction == "supports_yes"
+        and item.credibility >= 0.90
+        and item.relevance >= 0.70
+        for item in items
+    )
+    no = any(
+        item.direction == "supports_no"
+        and item.credibility >= 0.90
+        and item.relevance >= 0.70
+        for item in items
+    )
+    if yes and not no:
+        return "supports_yes"
+    if no and not yes:
+        return "supports_no"
+    return ""
+
+
+def _has_clear_official_signal(items: list[ResearchItem], direction: str) -> bool:
+    return any(
+        item.direction == direction
+        and item.credibility >= 0.90
+        and item.relevance >= 0.70
+        for item in items
+    )
+
+
+def _has_only_low_cred_opposition(items: list[ResearchItem], direction: str) -> bool:
+    opposite = "supports_no" if direction == "supports_yes" else "supports_yes"
+    opposition = [item for item in items if item.direction == opposite]
+    return bool(opposition) and all(item.credibility <= _SOCIAL_CEIL for item in opposition)
+
+
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 def analyze(market: Market, research: ResearchResult) -> SentimentResult:
@@ -263,6 +324,7 @@ def analyze(market: Market, research: ResearchResult) -> SentimentResult:
 
     contradictions = _detect_contradictions(items)
     rumor_risk = _rumor_risk(items, narrative_direction, off_w, total_weight)
+    signal_clarity = _signal_clarity(items, signal, contradictions)
 
     # ── R1 + R3: confidence ──────────────────────────────────────────────
     signal_strength = abs(signal)
@@ -278,6 +340,16 @@ def analyze(market: Market, research: ResearchResult) -> SentimentResult:
         base_conf = min(base_conf, _CONF_CAP_MEDIUM_RUMOR)
 
     confidence = max(0.0, min(1.0, base_conf))
+
+    floor_reason = ""
+    official_direction = _clear_official_direction(items)
+    if official_direction and signal_clarity == "high":
+        floor = _OFFICIAL_CLEAR_CONFIDENCE_FLOOR
+        if _has_only_low_cred_opposition(items, official_direction):
+            floor = max(floor, _OFFICIAL_CLEAR_SOCIAL_CONTRADICTION_FLOOR)
+        if confidence < floor:
+            confidence = floor
+            floor_reason = "official_clear_directional_signal"
 
     # ── R5: market impact capped unless official confirmation ────────────
     raw_impact = abs(signal) * confidence * _IMPACT_SCALE
@@ -306,7 +378,9 @@ def analyze(market: Market, research: ResearchResult) -> SentimentResult:
         source_credibility=round(avg_cred, 4),
         event_relevance=round(avg_rel, 4),
         rumor_risk=rumor_risk,
+        signal_clarity=signal_clarity,
     )
+    research.signal_clarity = signal_clarity
 
     logger.info(
         _MODULE, "analyzed",
@@ -318,6 +392,8 @@ def analyze(market: Market, research: ResearchResult) -> SentimentResult:
         items=len(items),
         contradictions=len(contradictions),
         impact_cents=market_impact,
+        signal_clarity=signal_clarity,
+        floor_reason=floor_reason,
     )
     return result
 

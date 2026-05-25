@@ -1,48 +1,52 @@
-# Black Gibbie Dashboard Prototype
+# Black Gibbie Paper Dashboard
 
-This is a local-only React + Vite prototype for visualizing the summary JSON shape returned by `scripts/paper_scanner_run.py`.
+Local-only observability for paper-mode scanner runs. It reads the SQLite audit
+tables and paper ledger; it does not place orders.
 
-It uses bundled mock data from `src/mockScannerData.js`. It does not call Kalshi, does not read `.env`, does not connect to trading code, and does not insert paper or live trades.
-
-## Run Locally
+## Install
 
 From the repo root:
 
 ```powershell
-cd dashboard
-npm install
-npm run dev
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Then open the Vite URL shown in the terminal, usually:
+## Record A Scan
+
+```powershell
+.\.venv\Scripts\python.exe scripts\paper_scanner_run.py --limit 4000 --category crypto
+```
+
+To allow approved decisions to enter the paper ledger:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\paper_scanner_run.py --limit 4000 --category crypto --execute-paper
+```
+
+The dashboard reads the same scan summary written by the paper runner,
+including canonical filter settings: `MIN_VOLUME_24H=1000` / `MIN_VOLUME`,
+`MAX_TIME_TO_RESOLUTION_HOURS=72` / `MAX_MINUTES_TO_EXPIRY=4320`,
+`MIN_YES_PRICE=15`, and `MIN_ORDERBOOK_DEPTH_AT_LIMIT=100`.
+
+## Run The Dashboard
+
+```powershell
+.\.venv\Scripts\python.exe -m dashboard.app
+```
+
+Open:
 
 ```text
-http://127.0.0.1:5173/
+http://127.0.0.1:8000/
 ```
 
-## Prototype Sections
+## API
 
-- Safety Banner
-- Scan Summary cards
-- Skip Reason table
-- Trade Decisions table
-- Paper Trades summary
-- Errors panel
-
-## Data Shape
-
-The mock scanner object includes:
-
-- `raw_markets`
-- `normalized_markets`
-- `passed_count`
-- `rejected_count`
-- `pass_rate`
-- `skip_reason_counts`
-- `skip_reason_examples`
-- `candidates_analyzed`
-- `execute_paper`
-- `dry_run`
-- `decisions`
-- `paper_trades_inserted`
-- `errors`
+- `GET /api/summary`
+- `GET /api/scan-runs`
+- `GET /api/audit`
+- `GET /api/skip-reasons`
+- `GET /api/paper-trades`
+- `GET /api/export/audit.csv`
+- `GET /api/export/skip-reasons.csv`
+- `GET /api/export/latest-scan.json`

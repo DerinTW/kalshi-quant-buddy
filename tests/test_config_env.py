@@ -46,6 +46,9 @@ def clear_safety_env(monkeypatch):
         "MIN_MINUTES_TO_EXPIRY",
         "MAX_TIME_TO_RESOLUTION_HOURS",
         "MAX_MINUTES_TO_EXPIRY",
+        "MIN_YES_PRICE",
+        "CATEGORY_ALLOWLIST",
+        "BLOCKED_EVENT_PREFIXES",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -64,7 +67,20 @@ def test_config_default_safety_values():
     assert c.min_paper_days_before_live == 7
     assert c.min_paper_trades_before_live == 100
     assert c.max_spread_pct == 20.0
-    assert c.min_volume_24h == 500
+    assert c.min_volume_24h == 1000
+    assert c.max_minutes_to_expiry == 4320
+    assert c.min_yes_price == 15
+    assert c.category_allowlist == [
+        "crypto",
+        "financial",
+        "economic",
+        "commodities",
+        "weather",
+        "science and technology",
+        "culture",
+    ]
+    assert "KXATP" in c.blocked_event_prefixes
+    assert "KXWNBA" in c.blocked_event_prefixes
 
 
 def test_config_backwards_compatible_env_aliases(monkeypatch):
@@ -98,7 +114,17 @@ def test_env_example_contains_required_safety_variables():
     assert _env_value(text, "MIN_PAPER_TRADES_BEFORE_LIVE") == "100"
     assert _env_value(text, "DEBUG") == "false"
     assert _env_value(text, "MAX_SPREAD_PCT") == "20"
-    assert _env_value(text, "MIN_VOLUME_24H") == "500"
+    assert _env_value(text, "MAX_TIME_TO_RESOLUTION_HOURS") == "72"
+    assert _env_value(text, "MAX_MINUTES_TO_EXPIRY") == "4320"
+    assert _env_value(text, "MIN_VOLUME") == "1000"
+    assert _env_value(text, "MIN_VOLUME_24H") == "1000"
+    assert _env_value(text, "MIN_YES_PRICE") == "15"
+    assert _env_value(text, "MIN_ORDERBOOK_DEPTH_AT_LIMIT") == "100"
+    assert (
+        _env_value(text, "CATEGORY_ALLOWLIST")
+        == "crypto,financial,economic,commodities,weather,science and technology,culture"
+    )
+    assert "KXATP" in (_env_value(text, "BLOCKED_EVENT_PREFIXES") or "")
 
 
 def test_env_example_contains_weird_move_documented_constants():

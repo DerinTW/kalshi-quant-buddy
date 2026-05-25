@@ -46,6 +46,8 @@ The default state is paper-only. The risk manager remains the hard gate before t
 
 Live orders require all explicit live flags, the confirmation phrase, paper-trading requirements, position-size caps, and risk-manager approval. The LLM cannot override risk controls.
 
+Default scanner filters are intentionally conservative before research/LLM budget is spent: `MIN_VOLUME_24H=1000` (alias `MIN_VOLUME`), `MAX_TIME_TO_RESOLUTION_HOURS=72` (alias `MAX_MINUTES_TO_EXPIRY=4320`), `MIN_YES_PRICE=15`, and `MIN_ORDERBOOK_DEPTH_AT_LIMIT=100`. The default tradable categories are crypto, finance, economics, commodities, climate, tech & science, and culture; obvious sports event prefixes are skipped early through `BLOCKED_EVENT_PREFIXES`.
+
 ## Tests
 
 Run the suite:

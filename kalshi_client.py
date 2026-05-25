@@ -1,6 +1,7 @@
 from __future__ import annotations
 import base64
 import time
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -240,12 +241,50 @@ class KalshiClient:
         """Return (best_yes_ask_cents, best_yes_bid_cents). Returns (-1,-1) on failure."""
         try:
             ob_data = self.get_orderbook(ticker, depth=1)
+            if isinstance(ob_data.get("orderbook_fp"), dict):
+                ob = ob_data["orderbook_fp"]
+                yes_bids = ob.get("yes_dollars") or []
+                no_bids = ob.get("no_dollars") or []
+                best_bid = _level_price_cents(yes_bids[-1]) if yes_bids else -1
+                best_no_bid = _level_price_cents(no_bids[-1]) if no_bids else -1
+                best_ask = 100 - best_no_bid if best_no_bid >= 0 else -1
+                return best_ask, best_bid
+
             ob = ob_data.get("orderbook", ob_data)
-            asks = ob.get("yes", {}).get("ask", [])
-            bids = ob.get("yes", {}).get("bid", [])
-            best_ask = asks[0][0] if asks else -1
-            best_bid = bids[0][0] if bids else -1
+            yes = ob.get("yes", {}) if isinstance(ob, dict) else {}
+            no = ob.get("no", {}) if isinstance(ob, dict) else {}
+            if isinstance(yes, list) or isinstance(no, list):
+                best_bid = _level_price_cents(yes[-1]) if yes else -1
+                best_no_bid = _level_price_cents(no[-1]) if no else -1
+                best_ask = 100 - best_no_bid if best_no_bid >= 0 else -1
+                return best_ask, best_bid
+
+            asks = yes.get("ask", []) or yes.get("asks", [])
+            bids = yes.get("bid", []) or yes.get("bids", [])
+            best_ask = _level_price_cents(asks[0]) if asks else -1
+            best_bid = _level_price_cents(bids[0]) if bids else -1
             return best_ask, best_bid
         except Exception as exc:
             logger.warn(_MODULE, "best_prices_failed", ticker=ticker, err=str(exc))
             return -1, -1
+
+
+def _level_price_cents(level: Any) -> int:
+    if isinstance(level, dict):
+        value = (
+            level.get("price")
+            or level.get("price_dollars")
+            or level.get("yes_price")
+            or level.get("no_price")
+        )
+    elif isinstance(level, (list, tuple)) and level:
+        value = level[0]
+    else:
+        return -1
+    try:
+        price = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return -1
+    if price <= 1:
+        price *= 100
+    return int(round(float(price)))

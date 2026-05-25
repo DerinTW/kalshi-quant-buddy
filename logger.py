@@ -80,6 +80,12 @@ def debug(module: str, event: str, msg: str = "", **data: Any) -> None:
         _console("DEBUG", module, msg or event)
 
 
+def audit(module: str, stage: str, **data: Any) -> None:
+    """Structured scan/audit record for reconstructing pipeline progression."""
+    record = _entry("AUDIT", module, stage, {"stage": stage, **data})
+    _write(record, "agent.jsonl")
+
+
 def decision(module: str, ticker: str, decision_type: str, outcome: str, **data: Any) -> None:
     """Structured decision audit record — written to decisions.jsonl."""
     record = _entry("DECISION", module, decision_type, {
