@@ -353,16 +353,22 @@ def enrich_with_orderbook_depth(
     Fetch the live orderbook for each market and compute top-of-book depth.
     Depth = max contracts available at the best YES-bid / implied-YES-ask.
     Kalshi REST orderbooks return bids only: a NO bid is the executable YES
-    ask. Sets market.orderbook_depth in-place. Best-effort; failures leave the
-    previous depth and orderbook_depth_fetched=False.
-    Call AFTER the structural filter pass so we only hit the API for candidates.
+    ask. Sets market.orderbook_depth in-place. Failures leave the previous
+    depth, keep orderbook_depth_fetched=False, and mark the market unsafe so
+    filters drop it before downstream analysis.
+    Call after cheap raw/structural screening and before any downstream
+    analysis that depends on a trustworthy depth gate.
     """
     for i, market in enumerate(markets):
         try:
             ob_data = client.get_orderbook(market.ticker, depth=depth)
             market.orderbook_depth = _parse_orderbook_top_depth(ob_data)
             market.orderbook_depth_fetched = True
+            market.fetched_at = datetime.now(timezone.utc)
         except Exception as exc:
+            if not market.is_unsafe:
+                market.is_unsafe = True
+                market.unsafe_reason = f"orderbook_fetch_failed: {str(exc)[:200]}"
             code = getattr(getattr(exc, "response", None), "status_code", None)
             if code == 429:
                 logger.warn(_MODULE, "rate_limited_orderbook", ticker=market.ticker,
@@ -658,6 +664,12 @@ def scan(client: KalshiClient, cfg: Config, status: str = "open") -> list[Market
 
         markets.append(m)
 
+    # Orderbook depth is a hard prerequisite for the filter stage. Fetch it for
+    # every market that survived raw prefiltering; failed fetches are marked
+    # unsafe by enrich_with_orderbook_depth() and rejected by filters.
+    enrich_with_orderbook_depth(markets, client, delay_seconds=0.0)
+
+    unsafe_count = sum(1 for market in markets if market.is_unsafe)
     safe_count = len(markets) - unsafe_count
     logger.info(
         _MODULE, "scan_done",

@@ -68,6 +68,20 @@ class FakeEnvelopeKalshiDataClient(FakeKalshiDataClient):
         return {"markets": list(self.raw_markets), "cursor": ""}
 
 
+class FakeCategoryPagingClient(FakeKalshiDataClient):
+    def __init__(self, raw_markets: list[dict]):
+        super().__init__(raw_markets)
+        self.market_calls: list[dict] = []
+
+    def get_series_list(self) -> list[dict]:
+        return [{"ticker": "KXCRYPTO", "category": "Crypto"}]
+
+    def get_markets(self, **kwargs) -> dict:
+        self.market_calls.append(dict(kwargs))
+        assert kwargs["limit"] <= 200
+        return {"markets": list(self.raw_markets), "cursor": ""}
+
+
 def cfg(tmp_path: Path, **overrides) -> Config:
     base = dict(
         kalshi_api_key="x",
@@ -314,6 +328,11 @@ def test_default_run_does_not_insert_paper_trades(tmp_path, patched_pipeline):
     assert summaries[-1]["status"] == "success"
     assert summaries[-1]["fetched_count"] == 1
     assert summaries[-1]["normalized_count"] == 1
+    records = agent_records(tmp_path)
+    assert not [
+        r for r in records
+        if r.get("stage") in {"fetched", "normalized"} and r.get("outcome") == "passed"
+    ]
 
 
 def test_execute_paper_inserts_only_paper_trades_when_risk_approved(
@@ -353,6 +372,57 @@ def test_paper_scanner_unwraps_kalshi_market_envelope_and_new_schema(
     assert summary["normalized_markets"] == 1
     assert summary["passed_count"] == 1
     assert summary["paper_trades_inserted"] == 1
+
+
+def test_category_fetch_pages_with_api_safe_limit(tmp_path, patched_pipeline):
+    c = cfg(tmp_path)
+    client = FakeCategoryPagingClient([raw_market_new_schema()])
+
+    summary = scanner.run_scan(
+        cfg=c,
+        client=client,
+        limit=4000,
+        execute_paper=True,
+        category="crypto",
+    )
+
+    assert client.market_calls
+    assert all(call["limit"] <= 200 for call in client.market_calls)
+    assert summary["raw_markets"] == 1
+    assert summary["passed_count"] == 1
+
+
+def test_paper_scanner_summary_pass_rate_and_examples_are_filter_based(
+    tmp_path,
+    patched_pipeline,
+):
+    bad = raw_market("KXBAD-26MAY15")
+    bad["yes_ask"] = 0
+    bad["yes_bid"] = 0
+    bad["no_ask"] = 0
+    bad["no_bid"] = 0
+
+    summary = scanner.run_scan(
+        cfg=cfg(tmp_path),
+        client=FakeKalshiDataClient([raw_market("KXGOOD-26MAY15"), bad]),
+        limit=2,
+    )
+
+    assert summary["normalized_markets"] == 2
+    assert summary["passed_count"] == 1
+    assert summary["rejected_count"] == 1
+    assert summary["pass_rate"] == 0.5
+    assert summary["top_bottleneck_filter"]["reason"] == "unsafe"
+    assert summary["passed_examples"][0]["ticker"] == "KXGOOD-26MAY15"
+
+    records = agent_records(tmp_path)
+    filter_passed = {
+        r["ticker"] for r in records if r.get("stage") == "filter_passed"
+    }
+    filter_skipped = {
+        r["ticker"] for r in records if r.get("stage") == "filter_skipped"
+    }
+    assert filter_passed.isdisjoint(filter_skipped)
 
 
 def test_normalization_exception_is_logged_and_scan_continues(

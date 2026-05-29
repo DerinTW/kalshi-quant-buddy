@@ -203,15 +203,14 @@ def _check_orderbook_depth(m: Market, cfg: Config) -> Optional[str]:
     Reject if top-of-book depth is below MIN_ORDERBOOK_DEPTH_AT_LIMIT.
 
     Two distinct states matter:
-      * orderbook_depth_fetched == False  → enrichment was never attempted
-        (e.g. this market wasn't in the candidate slice). Skip the check;
-        the upstream pipeline is responsible for enriching candidates.
+      * orderbook_depth_fetched == False  → enrichment failed or never ran.
+        Reject so no market enters downstream analysis without a live book.
       * orderbook_depth_fetched == True   → we asked the API and got an
         answer. Now `orderbook_depth == 0` means an empty book — that is a
         rejection, not a free pass.
     """
     if not m.orderbook_depth_fetched:
-        return None
+        return "orderbook_unfetched"
     if m.orderbook_depth < cfg.min_orderbook_depth_at_limit:
         return f"depth={m.orderbook_depth} < min {cfg.min_orderbook_depth_at_limit}"
     return None
@@ -302,10 +301,31 @@ def run(markets: list[Market], cfg: Config) -> FilterResult:
 
     # Deduplication runs only on markets that passed structural checks
     passed_final = _deduplicate(passed_p1, rejected)
+    _assert_no_pass_reject_overlap(passed_final, rejected)
 
     result = FilterResult(passed=passed_final, rejected=rejected)
     _log_summary(result, len(markets))
     return result
+
+
+def _assert_no_pass_reject_overlap(
+    passed: list[Market],
+    rejected: list[tuple[Market, str]],
+) -> None:
+    passed_tickers = {market.ticker for market in passed}
+    rejected_tickers = {market.ticker for market, _ in rejected}
+    overlap = sorted(passed_tickers & rejected_tickers)
+    if overlap:
+        logger.error(
+            _MODULE,
+            "filter_integrity_overlap",
+            tickers=overlap[:10],
+            overlap_count=len(overlap),
+        )
+        raise RuntimeError(
+            "filter integrity error: tickers cannot be both passed and rejected: "
+            + ", ".join(overlap[:10])
+        )
 
 
 def _log_summary(result: FilterResult, total: int) -> None:

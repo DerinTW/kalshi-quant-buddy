@@ -57,6 +57,7 @@ def valid_market(**overrides) -> Market:
         "fetched_at": now - timedelta(seconds=5),
         "last_trade_at": None,
         "orderbook_depth": 200,
+        "orderbook_depth_fetched": True,
     }
     values.update(overrides)
     return Market(**values)

@@ -26,6 +26,34 @@ def _env_int(names: tuple[str, ...], default: str) -> int:
     return int(default)
 
 
+def _mode_prefix() -> str:
+    mode = os.getenv("TRADING_MODE", "paper").strip().lower()
+    if mode == "live":
+        return "LIVE"
+    if mode == "paper":
+        return "PAPER"
+    return ""
+
+
+def _mode_names(names: tuple[str, ...]) -> tuple[str, ...]:
+    prefix = _mode_prefix()
+    if prefix == "LIVE":
+        return tuple(f"{prefix}_{name}" for name in names)
+    if not prefix:
+        return names
+    return tuple(f"{prefix}_{name}" for name in names) + names
+
+
+def _env_float_mode(names: tuple[str, ...], paper_default: str, live_default: str) -> float:
+    default = live_default if _mode_prefix() == "LIVE" else paper_default
+    return _env_float(_mode_names(names), default)
+
+
+def _env_int_mode(names: tuple[str, ...], paper_default: str, live_default: str) -> int:
+    default = live_default if _mode_prefix() == "LIVE" else paper_default
+    return _env_int(_mode_names(names), default)
+
+
 def _max_minutes_to_expiry_default() -> int:
     hours = os.getenv("MAX_TIME_TO_RESOLUTION_HOURS")
     if hours is not None:
@@ -78,19 +106,19 @@ class Config:
     paper_bankroll: float = field(default_factory=lambda: float(os.getenv("PAPER_BANKROLL", "1000.0")))
 
     # Market filters
-    min_liquidity_dollars: float = field(default_factory=lambda: _env_float(("MIN_LIQUIDITY", "MIN_LIQUIDITY_DOLLARS"), "500"))
-    max_spread_pct: float = field(default_factory=lambda: float(os.getenv("MAX_SPREAD_PCT", "20")))
+    min_liquidity_dollars: float = field(default_factory=lambda: _env_float_mode(("MIN_LIQUIDITY", "MIN_LIQUIDITY_DOLLARS"), "25", "500"))
+    max_spread_pct: float = field(default_factory=lambda: _env_float_mode(("MAX_SPREAD_PCT",), "50", "20"))
     min_minutes_to_expiry: int = field(default_factory=lambda: _env_int(("MIN_MINUTES_TO_EXPIRY", "MIN_TIME_TO_RESOLUTION_MINUTES"), "20"))
     max_minutes_to_expiry: int = field(default_factory=_max_minutes_to_expiry_default)
-    min_volume_24h: int = field(default_factory=lambda: _env_int(("MIN_VOLUME_24H", "MIN_VOLUME"), "1000"))
-    min_yes_price: int = field(default_factory=lambda: int(os.getenv("MIN_YES_PRICE", "15")))
-    max_yes_price: int = field(default_factory=lambda: int(os.getenv("MAX_YES_PRICE", "85")))
+    min_volume_24h: int = field(default_factory=lambda: _env_int_mode(("MIN_VOLUME_24H", "MIN_VOLUME"), "50", "1000"))
+    min_yes_price: int = field(default_factory=lambda: _env_int_mode(("MIN_YES_PRICE",), "1", "15"))
+    max_yes_price: int = field(default_factory=lambda: _env_int_mode(("MAX_YES_PRICE",), "99", "85"))
     # Absolute spread cap in cents (yes_ask - yes_bid); separate from the pct check
-    max_spread_cents: int = field(default_factory=lambda: _env_int(("MAX_SPREAD_CENTS",), "6"))
+    max_spread_cents: int = field(default_factory=lambda: _env_int_mode(("MAX_SPREAD_CENTS",), "10", "6"))
     # How old our fetched market/orderbook snapshot can be before it is considered stale
-    max_orderbook_age_seconds: int = field(default_factory=lambda: int(os.getenv("MAX_ORDERBOOK_AGE_SECONDS", "60")))
+    max_orderbook_age_seconds: int = field(default_factory=lambda: _env_int_mode(("MAX_ORDERBOOK_AGE_SECONDS",), "300", "60"))
     # Minimum contracts available at the best ask/bid before the market is considered too thin
-    min_orderbook_depth_at_limit: int = field(default_factory=lambda: int(os.getenv("MIN_ORDERBOOK_DEPTH_AT_LIMIT", "100")))
+    min_orderbook_depth_at_limit: int = field(default_factory=lambda: _env_int_mode(("MIN_ORDERBOOK_DEPTH_AT_LIMIT",), "25", "100"))
     # Comma-separated list of allowed categories; empty = all categories allowed
     # politics is intentionally omitted from the default (too noisy / regulatory risk)
     category_allowlist: list[str] = field(
@@ -130,14 +158,14 @@ class Config:
     stale_book_minutes: int = field(default_factory=lambda: int(os.getenv("STALE_BOOK_MINUTES", "60")))
 
     # Edge thresholds
-    min_edge_pct: float = field(default_factory=lambda: float(os.getenv("MIN_EDGE_PCT", "7")))
-    min_adjusted_edge_pct: float = field(default_factory=lambda: float(os.getenv("MIN_ADJUSTED_EDGE_PCT", "5")))
+    min_edge_pct: float = field(default_factory=lambda: _env_float_mode(("MIN_EDGE_PCT",), "4", "7"))
+    min_adjusted_edge_pct: float = field(default_factory=lambda: _env_float_mode(("MIN_ADJUSTED_EDGE_PCT",), "2", "5"))
     slippage_cents: int = field(default_factory=lambda: int(os.getenv("SLIPPAGE_CENTS", "2")))
     fee_pct: float = field(default_factory=lambda: float(os.getenv("FEE_PCT", "0.0")))
     min_confidence: float = field(default_factory=lambda: float(os.getenv("MIN_CONFIDENCE", "0.65")))
-    min_confidence_adjusted_edge_cents: float = field(default_factory=lambda: float(os.getenv("MIN_CONFIDENCE_ADJUSTED_EDGE_CENTS", "4.0")))
+    min_confidence_adjusted_edge_cents: float = field(default_factory=lambda: _env_float_mode(("MIN_CONFIDENCE_ADJUSTED_EDGE_CENTS",), "1.5", "4.0"))
     # Spread gate applied at the edge layer (stricter than the filter's max_spread_cents)
-    max_spread_cents_edge: int = field(default_factory=lambda: int(os.getenv("MAX_SPREAD_CENTS_EDGE", "6")))
+    max_spread_cents_edge: int = field(default_factory=lambda: _env_int_mode(("MAX_SPREAD_CENTS_EDGE",), "10", "6"))
 
     # Risk limits
     max_trade_dollars: float = field(default_factory=lambda: _env_float(("MAX_DOLLARS_PER_TRADE", "MAX_TRADE_DOLLARS"), "10"))

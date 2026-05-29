@@ -2,13 +2,21 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 _log_dir: str = "./logs"
 _initialized: bool = False
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utc_now_z() -> str:
+    return _utc_now().isoformat().replace("+00:00", "Z")
 
 
 def init(log_dir: str) -> None:
@@ -25,7 +33,7 @@ def _ensure_init() -> None:
 
 def _entry(level: str, module: str, event: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": _utc_now_z(),
         "level": level,
         "module": module,
         "event": event,
@@ -41,7 +49,7 @@ def _write(record: dict[str, Any], filename: str) -> None:
 
 
 def _console(level: str, module: str, msg: str) -> None:
-    ts = datetime.utcnow().strftime("%H:%M:%S")
+    ts = _utc_now().strftime("%H:%M:%S")
     prefix = {"INFO": "*", "WARN": "!", "ERROR": "x", "DEBUG": "."}.get(level, "*")
     stream = sys.stdout if level != "ERROR" else sys.stderr
     line = f"[{ts}] {prefix} [{module}] {msg}"
@@ -100,5 +108,5 @@ def decision(module: str, ticker: str, decision_type: str, outcome: str, **data:
 def trade(record_data: dict[str, Any]) -> None:
     """Append a trade execution record to trades.jsonl."""
     _ensure_init()
-    record = {"ts": datetime.utcnow().isoformat() + "Z", "level": "TRADE", **record_data}
+    record = {"ts": _utc_now_z(), "level": "TRADE", **record_data}
     _write(record, "trades.jsonl")

@@ -117,8 +117,7 @@ These do not block Step 21 but should be tracked before Stage 7 (limited live mo
 1. **Category metadata not in `paper_trades`.** Exposure helper falls back conservatively, but adding the column closes the over-counting gap. Requires a small `ALTER TABLE` migration in `db._create_tables`.
 2. **`monitor.check_positions` is still manual.** There is no scheduler. Acceptable for paper; before live, decide whether a `cron` or systemd timer wraps `--monitor-only`, or whether a separate `--paper-loop` is added (still off by default).
 3. **No analytics module** (Stage 8). Calibration, Brier, realised EV, win-rate-by-category, slippage, drawdown, postmortem-cause histogram are unimplemented. The raw inputs are captured in `paper_trades` and `postmortems`.
-4. **`datetime.utcnow()` deprecations.** ~1.3k warnings during the suite from `logger.py` and `postmortem.py`. Cosmetic; tracked separately.
-5. **RSS feed URLs can rot.** No active health check. Today the `RSSNewsAgent` swallows feed errors and falls back to Perplexity.
+4. **RSS feed URLs can rot.** No active health check. Today the `RSSNewsAgent` swallows feed errors and falls back to Perplexity.
 
 ---
 

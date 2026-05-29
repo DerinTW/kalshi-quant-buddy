@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,10 @@ from models import Postmortem, TradeRecord
 _MODULE = "postmortem"
 _PENDING_RULES_PATH = Path("rules") / "rules_pending_review.json"
 _processed_trade_ids: set[str] = set()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def run_for_trade(
@@ -223,7 +227,7 @@ def _write_pending_rule_changes(
     entry = {
         "trade_id": trade.id,
         "ticker": trade.ticker,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": _utc_now_iso(),
         "root_causes": report.get("root_causes", []),
         "rule_changes_proposed": report.get("rule_changes_proposed", []),
         "requires_human_approval": True,

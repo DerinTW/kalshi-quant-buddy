@@ -90,9 +90,11 @@ def test_env_example_contains_safe_defaults():
     assert _env_value(text, "MAX_TRADE_DOLLARS") == "10"
     assert _env_value(text, "MAX_DAILY_LOSS") == "20"
     assert _env_value(text, "MAX_TRADES_PER_DAY") == "5"
-    assert _env_value(text, "MAX_SPREAD_CENTS") == "6"
-    assert _env_value(text, "MIN_LIQUIDITY") == "500"
-    assert _env_value(text, "MIN_LIQUIDITY_DOLLARS") == "500"
+    assert _env_value(text, "MAX_SPREAD_CENTS") == "10"
+    assert _env_value(text, "MIN_LIQUIDITY") == "25"
+    assert _env_value(text, "MIN_LIQUIDITY_DOLLARS") == "25"
+    assert "LIVE_MAX_SPREAD_CENTS=6" in text
+    assert "LIVE_MIN_LIQUIDITY=500" in text
 
 
 def test_storage_wrappers_delegate_to_db(monkeypatch):

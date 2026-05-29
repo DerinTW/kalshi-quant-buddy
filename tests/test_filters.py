@@ -11,7 +11,7 @@ Covers the structural filter pass before any LLM/research/edge work:
     allowlist uses the short lowercase form (regression for the case where
     pass_rate dropped to 0 because of a case/alias mismatch)
   * orderbook-depth gate uses the `orderbook_depth_fetched` flag so that
-    markets where enrichment never ran do not falsely pass the gate
+    markets where enrichment never ran are rejected before downstream work
   * orderbook freshness uses fetched_at (not last_trade_at)
 """
 from __future__ import annotations
@@ -237,13 +237,13 @@ def test_zero_depth_after_successful_fetch_is_a_rejection_not_a_pass():
     assert "depth" in result.skip_reason_counts
 
 
-def test_depth_check_skipped_when_not_yet_fetched():
-    # When the candidate has not been enriched yet (e.g. ahead of
-    # enrich_with_orderbook_depth in a different pipeline shape), the depth
-    # gate must not falsely reject.
+def test_depth_check_rejects_when_not_yet_fetched():
+    # A live orderbook fetch is a hard prerequisite for downstream analysis.
+    # Markets that reach filters without enrichment must not pass silently.
     m = valid_market(orderbook_depth=0, orderbook_depth_fetched=False)
     result = filters.run([m], make_cfg(min_orderbook_depth_at_limit=100))
-    assert len(result.passed) == 1
+    assert result.passed == []
+    assert "orderbook_unfetched" in result.skip_reason_counts
 
 
 # ── Category filtering works end-to-end ─────────────────────────────────────
@@ -356,6 +356,19 @@ def test_pass_rate_reflects_passed_over_total():
     assert result.pass_rate == 1 / 3
 
 
+def test_rejected_market_cannot_also_appear_in_passed_list():
+    good = valid_market(ticker="GOOD")
+    rejected = valid_market(ticker="BAD", volume_24h=10)
+
+    result = filters.run([good, rejected], make_cfg())
+
+    passed_tickers = {market.ticker for market in result.passed}
+    rejected_tickers = {market.ticker for market, _ in result.rejected}
+    assert passed_tickers == {"GOOD"}
+    assert rejected_tickers == {"BAD"}
+    assert passed_tickers.isdisjoint(rejected_tickers)
+
+
 # ── Scanner enrichment sets the orderbook_depth_fetched flag ────────────────
 
 def test_enrich_with_orderbook_depth_sets_fetched_flag(monkeypatch):
@@ -375,6 +388,7 @@ def test_enrich_with_orderbook_depth_sets_fetched_flag(monkeypatch):
 
     assert market.orderbook_depth_fetched is True
     assert market.orderbook_depth == 250
+    assert market.fetched_at is not None
 
 
 def test_enrich_with_orderbook_depth_parses_current_orderbook_fp_shape(monkeypatch):
@@ -456,6 +470,8 @@ def test_enrich_with_orderbook_depth_does_not_mark_unrecognized_payload_as_fetch
 
     assert market.orderbook_depth == 10
     assert market.orderbook_depth_fetched is False
+    assert market.is_unsafe is True
+    assert market.unsafe_reason.startswith("orderbook_fetch_failed:")
 
 
 def test_enrich_with_orderbook_depth_does_not_mark_fetch_exception_as_fetched(monkeypatch):
@@ -473,6 +489,8 @@ def test_enrich_with_orderbook_depth_does_not_mark_fetch_exception_as_fetched(mo
 
     assert market.orderbook_depth == 10
     assert market.orderbook_depth_fetched is False
+    assert market.is_unsafe is True
+    assert market.unsafe_reason.startswith("orderbook_fetch_failed:")
 
 
 # ── Dedup pass keeps the best market per event group ────────────────────────

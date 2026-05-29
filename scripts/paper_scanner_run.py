@@ -150,7 +150,7 @@ def run_scan(
             prefilter_skipped_count=len(prefilter_skips),
             normalized_count=len(normalized),
         )
-        _audit_markets(scan_run_id, normalized, stage="normalized", outcome="passed")
+        _audit_markets(scan_run_id, normalized, stage="normalized", outcome="normalized")
         if category:
             desired = filters._normalize_category(category)
             category_mismatches = [
@@ -174,6 +174,7 @@ def run_scan(
         _log_filter_result(raw_markets, normalized, filter_result)
 
         passed = list(filter_result.passed)
+        _enrich_history(passed, client)
         candidates = _select_candidates(passed, limit)
         weird_signals = _detect_weird_moves(passed)
         markets_by_event = _group_by_event(passed)
@@ -194,6 +195,8 @@ def run_scan(
             "pass_rate": filter_result.pass_rate,
             "skip_reason_counts": filter_result.skip_reason_counts,
             "skip_reason_examples": filter_result.skip_reason_examples,
+            "top_bottleneck_filter": _top_bottleneck(filter_result),
+            "passed_examples": _passed_examples(filter_result.passed),
             "candidates_analyzed": 0,
             "execute_paper": bool(execute_paper),
             "dry_run": bool(dry_run),
@@ -479,19 +482,39 @@ def _fetch_raw_markets_for_category(
         series_ticker = str(item.get("ticker") or "").strip()
         if not series_ticker:
             continue
-        response = client.get_markets(  # type: ignore[attr-defined]
-            status="open",
-            limit=max(1, limit - len(raw_markets)),
-            series_ticker=series_ticker,
-            mve_filter="exclude",
-        )
-        for raw in _extract_market_list(response):
-            enriched = dict(raw)
-            enriched.setdefault("series_ticker", series_ticker)
-            enriched.setdefault("category", desired)
-            raw_markets.append(enriched)
-            if len(raw_markets) >= limit:
-                return raw_markets
+        cursor: Optional[str] = None
+        while len(raw_markets) < limit:
+            page_limit = min(200, limit - len(raw_markets))
+            try:
+                response = client.get_markets(  # type: ignore[attr-defined]
+                    status="open",
+                    limit=page_limit,
+                    series_ticker=series_ticker,
+                    mve_filter="exclude",
+                    cursor=cursor,
+                )
+            except Exception as exc:
+                logger.warn(
+                    _MODULE,
+                    "category_series_fetch_failed",
+                    category=category,
+                    series_ticker=series_ticker,
+                    err=str(exc),
+                )
+                break
+            batch = _extract_market_list(response)
+            if not batch:
+                break
+            for raw in batch:
+                enriched = dict(raw)
+                enriched.setdefault("series_ticker", series_ticker)
+                enriched.setdefault("category", desired)
+                raw_markets.append(enriched)
+                if len(raw_markets) >= limit:
+                    return raw_markets
+            cursor = response.get("cursor") if isinstance(response, dict) else None
+            if not cursor:
+                break
     return raw_markets
 
 
@@ -582,9 +605,23 @@ def _derive_series_ticker(raw: dict[str, Any]) -> str:
 def _normalize_series_category(category: Any) -> str:
     text = str(category or "").strip().lower()
     aliases = {
+        "climate": "weather",
         "climate and weather": "weather",
+        "weather": "weather",
+        "economic": "economic",
         "economics": "economic",
+        "finance": "financial",
+        "financial": "financial",
         "financials": "financial",
+        "commodity": "commodities",
+        "commodities": "commodities",
+        "science & technology": "science and technology",
+        "science": "science and technology",
+        "technology": "science and technology",
+        "tech": "science and technology",
+        "tech and science": "science and technology",
+        "tech & science": "science and technology",
+        "entertainment": "culture",
     }
     return aliases.get(text, text)
 
@@ -740,9 +777,11 @@ def _filter_config_summary(cfg: Config) -> dict[str, Any]:
         "min_volume_24h": cfg.min_volume_24h,
         "min_liquidity": cfg.min_liquidity_dollars,
         "max_spread_cents": cfg.max_spread_cents,
+        "max_spread_pct": cfg.max_spread_pct,
         "min_yes_price": cfg.min_yes_price,
         "max_yes_price": cfg.max_yes_price,
         "max_minutes_to_expiry": cfg.max_minutes_to_expiry,
+        "max_orderbook_age_seconds": cfg.max_orderbook_age_seconds,
         "min_orderbook_depth_at_limit": cfg.min_orderbook_depth_at_limit,
         "category_allowlist": list(cfg.category_allowlist),
         "blocked_event_prefixes": list(getattr(cfg, "blocked_event_prefixes", [])),
@@ -797,6 +836,11 @@ def _enrich_candidates(markets: list[Market], client: object) -> None:
             market_scanner.enrich_with_orderbook_depth(markets, client, delay_seconds=0.0)  # type: ignore[arg-type]
         except Exception as exc:
             logger.warn(_MODULE, "orderbook_enrichment_failed", err=str(exc))
+
+
+def _enrich_history(markets: list[Market], client: object) -> None:
+    if not markets:
+        return
     if hasattr(market_scanner, "enrich_with_history"):
         try:
             market_scanner.enrich_with_history(markets, client, delay_seconds=0.0)  # type: ignore[arg-type]
@@ -819,7 +863,40 @@ def _log_filter_result(
         pass_rate=round(result.pass_rate, 4),
         skip_reason_counts=result.skip_reason_counts,
         skip_reason_examples=result.skip_reason_examples,
+        top_bottleneck_filter=_top_bottleneck(result),
+        passed_examples=_passed_examples(result.passed),
     )
+
+
+def _top_bottleneck(result: filters.FilterResult) -> Optional[dict[str, Any]]:
+    counts = result.skip_reason_counts
+    if not counts:
+        return None
+    reason, count = next(iter(counts.items()))
+    return {
+        "reason": reason,
+        "count": count,
+        "examples": result.skip_reason_examples.get(reason, []),
+    }
+
+
+def _passed_examples(markets: list[Market], limit: int = 5) -> list[dict[str, Any]]:
+    examples: list[dict[str, Any]] = []
+    for market in markets[:limit]:
+        examples.append(
+            {
+                "ticker": market.ticker,
+                "category": market.category,
+                "yes_ask": market.yes_ask,
+                "yes_bid": market.yes_bid,
+                "spread_cents": market.yes_ask - market.yes_bid,
+                "volume_24h": market.volume_24h,
+                "liquidity_dollars": round(float(market.liquidity_dollars), 2),
+                "orderbook_depth": market.orderbook_depth,
+                "minutes_to_close": round(float(market.minutes_to_close), 1),
+            }
+        )
+    return examples
 
 
 def _detect_weird_moves(markets: list[Market]) -> dict[str, WeirdMoveSignal]:
@@ -1078,7 +1155,7 @@ def _audit_raw_markets(scan_run_id: str, raw_markets: list[dict[str, Any]]) -> N
                 "category": raw.get("category"),
                 "status": raw.get("status"),
                 "stage": "fetched",
-                "outcome": "passed",
+                "outcome": "observed",
                 "yes_bid": _raw_cents(raw, "yes_bid"),
                 "yes_ask": _raw_cents(raw, "yes_ask"),
                 "no_bid": _raw_cents(raw, "no_bid"),

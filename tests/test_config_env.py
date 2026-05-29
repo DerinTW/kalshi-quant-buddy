@@ -47,6 +47,15 @@ def clear_safety_env(monkeypatch):
         "MAX_TIME_TO_RESOLUTION_HOURS",
         "MAX_MINUTES_TO_EXPIRY",
         "MIN_YES_PRICE",
+        "MAX_YES_PRICE",
+        "MAX_SPREAD_CENTS",
+        "MAX_SPREAD_PCT",
+        "MIN_LIQUIDITY",
+        "MIN_ORDERBOOK_DEPTH_AT_LIMIT",
+        "MIN_EDGE_PCT",
+        "MIN_ADJUSTED_EDGE_PCT",
+        "MAX_SPREAD_CENTS_EDGE",
+        "MIN_CONFIDENCE_ADJUSTED_EDGE_CENTS",
         "CATEGORY_ALLOWLIST",
         "BLOCKED_EVENT_PREFIXES",
     ):
@@ -66,10 +75,19 @@ def test_config_default_safety_values():
     assert c.max_live_dollars_per_trade == 1.0
     assert c.min_paper_days_before_live == 7
     assert c.min_paper_trades_before_live == 100
-    assert c.max_spread_pct == 20.0
-    assert c.min_volume_24h == 1000
+    assert c.max_spread_pct == 50.0
+    assert c.min_liquidity_dollars == 25.0
+    assert c.min_volume_24h == 50
     assert c.max_minutes_to_expiry == 4320
-    assert c.min_yes_price == 15
+    assert c.min_yes_price == 1
+    assert c.max_yes_price == 99
+    assert c.max_spread_cents == 10
+    assert c.max_orderbook_age_seconds == 300
+    assert c.min_orderbook_depth_at_limit == 25
+    assert c.min_edge_pct == 4
+    assert c.min_adjusted_edge_pct == 2
+    assert c.max_spread_cents_edge == 10
+    assert c.min_confidence_adjusted_edge_cents == 1.5
     assert c.category_allowlist == [
         "crypto",
         "financial",
@@ -100,6 +118,25 @@ def test_config_backwards_compatible_env_aliases(monkeypatch):
     assert c.max_minutes_to_expiry == 48 * 60
 
 
+def test_live_mode_defaults_keep_strict_filter_and_edge_gates(monkeypatch):
+    monkeypatch.setenv("TRADING_MODE", "live")
+
+    c = Config(kalshi_api_key="x", anthropic_api_key="x", kalshi_private_key_path="")
+
+    assert c.min_liquidity_dollars == 500.0
+    assert c.max_spread_pct == 20.0
+    assert c.min_volume_24h == 1000
+    assert c.min_yes_price == 15
+    assert c.max_yes_price == 85
+    assert c.max_spread_cents == 6
+    assert c.max_orderbook_age_seconds == 60
+    assert c.min_orderbook_depth_at_limit == 100
+    assert c.min_edge_pct == 7
+    assert c.min_adjusted_edge_pct == 5
+    assert c.max_spread_cents_edge == 6
+    assert c.min_confidence_adjusted_edge_cents == 4.0
+
+
 def test_env_example_contains_required_safety_variables():
     text = (ROOT / ".env.example").read_text(encoding="utf-8")
 
@@ -113,13 +150,20 @@ def test_env_example_contains_required_safety_variables():
     assert _env_value(text, "MAX_LIVE_TRADE_DOLLARS") == "1"
     assert _env_value(text, "MIN_PAPER_TRADES_BEFORE_LIVE") == "100"
     assert _env_value(text, "DEBUG") == "false"
-    assert _env_value(text, "MAX_SPREAD_PCT") == "20"
+    assert _env_value(text, "MAX_SPREAD_PCT") == "50"
     assert _env_value(text, "MAX_TIME_TO_RESOLUTION_HOURS") == "72"
     assert _env_value(text, "MAX_MINUTES_TO_EXPIRY") == "4320"
-    assert _env_value(text, "MIN_VOLUME") == "1000"
-    assert _env_value(text, "MIN_VOLUME_24H") == "1000"
-    assert _env_value(text, "MIN_YES_PRICE") == "15"
-    assert _env_value(text, "MIN_ORDERBOOK_DEPTH_AT_LIMIT") == "100"
+    assert _env_value(text, "MIN_VOLUME") == "50"
+    assert _env_value(text, "MIN_VOLUME_24H") == "50"
+    assert _env_value(text, "MIN_YES_PRICE") == "1"
+    assert _env_value(text, "MAX_YES_PRICE") == "99"
+    assert _env_value(text, "MAX_SPREAD_CENTS") == "10"
+    assert _env_value(text, "MAX_ORDERBOOK_AGE_SECONDS") == "300"
+    assert _env_value(text, "MIN_LIQUIDITY") == "25"
+    assert _env_value(text, "MIN_LIQUIDITY_DOLLARS") == "25"
+    assert _env_value(text, "MIN_ORDERBOOK_DEPTH_AT_LIMIT") == "25"
+    assert _env_value(text, "MIN_EDGE_PCT") == "4"
+    assert _env_value(text, "MIN_ADJUSTED_EDGE_PCT") == "2"
     assert (
         _env_value(text, "CATEGORY_ALLOWLIST")
         == "crypto,financial,economic,commodities,weather,science and technology,culture"

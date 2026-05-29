@@ -2,7 +2,7 @@
 
 Audit date: 2026-05-15
 Branch: `main`
-Test suite: `python -m pytest` → **323 passed, 0 failed** (lots of `datetime.utcnow` deprecation warnings, no test failures).
+Test suite: `python -m pytest` → **425 passed, 0 failed** (UTC timestamp deprecation warnings resolved).
 Entry points:
 - `python main.py --init-only` → initialises log dir + sqlite DB, exits cleanly.
 - `python main.py` → logs `startup_safe_mode` and exits. No autonomous loop is started, as required.
@@ -33,7 +33,7 @@ What appears implemented
 - No trading yet on this path: scanner→filter is callable in isolation via `pipeline.run_once` and never reaches `trading.execute` unless every upstream gate is positive.
 
 What still needs work
-- None for Stage 1. Optional polish: migrate logger off `datetime.utcnow()` (1.2k deprecation warnings).
+- None for Stage 1.
 
 Tests that cover it
 - `tests/test_config_env.py` — env wiring.
@@ -248,12 +248,11 @@ Blocking
 3. **Monitor loop is not called from any orchestration.** Either wire it into `pipeline.run_once` as an optional final step or add an explicit `--monitor-only` CLI flag.
 
 Non-blocking polish
-4. Migrate `logger.py` and `postmortem.py` off `datetime.utcnow()` — currently 1.2k deprecation warnings.
-5. Add the missing unit tests called out under each stage above (filter matrix, dedup, LLM-cap regression, full lifecycle, base_rules.json invariant, live-gate matrix).
-6. Decide whether postmortems should mirror to `logs/postmortems.jsonl` for parity with the blueprint wording.
+4. Add the missing unit tests called out under each stage above (filter matrix, dedup, LLM-cap regression, full lifecycle, base_rules.json invariant, live-gate matrix).
+5. Decide whether postmortems should mirror to `logs/postmortems.jsonl` for parity with the blueprint wording.
 
 Run results
-- `python -m pytest` → 323 passed, 0 failed.
+- `python -m pytest` → 425 passed, 0 failed.
 - `python main.py --init-only` → exits cleanly, logs `initialized`.
 - `python main.py` → exits cleanly, logs `startup_safe_mode`, does **not** start a loop.
 - No code changes were required to get the suite green; no safety checks were touched.

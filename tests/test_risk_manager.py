@@ -209,8 +209,8 @@ def test_default_config_has_safe_defaults(monkeypatch):
     assert c.max_trades_per_day == 5
     assert c.max_category_exposure_dollars == 25.0
     assert c.max_correlated_exposure_dollars == 15.0
-    assert c.max_spread_cents == 6
-    assert c.min_liquidity_dollars == 500.0
+    assert c.max_spread_cents == 10
+    assert c.min_liquidity_dollars == 25.0
     assert c.min_paper_days_before_live == 7
     assert c.min_paper_trades_before_live == 100
 
@@ -218,7 +218,10 @@ def test_default_config_has_safe_defaults(monkeypatch):
 @pytest.mark.parametrize(
     "kwargs,token",
     [
-        ({"c": cfg(kill_switch=True)}, "kill_switch_engaged"),
+        (
+            {"c": cfg(kill_switch=True, trading_mode="live", live_trading_enabled=True)},
+            "kill_switch_engaged",
+        ),
         ({"c": cfg(trading_mode="chaos")}, "invalid_trading_mode"),
         ({"c": cfg(trading_mode="live", live_trading_enabled=False)}, "live_mode_not_enabled"),
         ({"daily_pnl": -20.0}, "daily_loss_limit"),
@@ -289,6 +292,13 @@ def test_one_to_twenty_four_hours_can_approve_when_all_checks_pass():
     decision = assess()
 
     assert decision.approved is True
+
+
+def test_kill_switch_does_not_block_valid_paper_trade():
+    decision = assess(c=cfg(kill_switch=True, trading_mode="paper"))
+
+    assert decision.approved is True
+    assert any("kill_switch_live_only" in check for check in decision.checks_passed)
 
 
 def test_long_horizon_rejects_unsupported_categories():

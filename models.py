@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 
@@ -14,6 +14,10 @@ def _iso(value: Optional[datetime]) -> Optional[str]:
         return value.isoformat()
     except Exception:
         return None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _str_list(value: Any) -> list[str]:
@@ -123,7 +127,7 @@ class Orderbook:
     ticker: str
     yes_bids: list[tuple[int, int]]   # [(price_cents, size), ...]
     yes_asks: list[tuple[int, int]]
-    fetched_at: datetime = field(default_factory=datetime.utcnow)
+    fetched_at: datetime = field(default_factory=_utc_now)
 
 
 @dataclass
@@ -150,7 +154,7 @@ class WeirdMoveSignal:
     triggers: list[str]      # which threshold(s) fired
     description: str
     confidence: str          # high | medium | low
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=_utc_now)
 
     def to_dict(self) -> dict:
         return {
@@ -265,7 +269,7 @@ class ResearchResult:
     failed_reason: str = ""
     signal_clarity: str = "low"  # high | medium | low
     base_rate_signal: Optional["BaseRateSignal"] = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=_utc_now)
 
     @property
     def raw_text(self) -> str:
@@ -347,7 +351,7 @@ class SentimentResult:
     major_contradictions: list[str]     # human-readable conflict descriptions
     item_count: int = 0
     contributing_sources: list[str] = field(default_factory=list)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=_utc_now)
     # ── Spec-aligned narrative fields (added; default for back-compat) ─────
     source_credibility: float = 0.0     # weighted avg credibility of inputs
     event_relevance: float = 0.0        # weighted avg relevance of inputs
@@ -462,7 +466,7 @@ class ProbabilityEstimate:
     invalidation_conditions: list[str] = field(default_factory=list)
     confidence_breakdown: dict[str, Any] = field(default_factory=dict)
     base_rate_signal: Optional[BaseRateSignal] = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=_utc_now)
 
     @property
     def no_probability(self) -> float:
@@ -552,7 +556,7 @@ class RiskAssessment:
     mode: str
     checks_passed: list[str] = field(default_factory=list)
     checks_failed: list[str] = field(default_factory=list)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=_utc_now)
 
     @property
     def rejection_reasons(self) -> list[str]:
@@ -603,7 +607,7 @@ class TradeRecord:
     mode: str                        # dry_run | paper | live
     thesis: str = ""
     estimated_yes_prob: float = 0.0
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=_utc_now)
     exit_price_cents: Optional[int] = None
     exit_timestamp: Optional[datetime] = None
     pnl_dollars: Optional[float] = None
@@ -718,7 +722,7 @@ class ExecutionReport:
     client_order_id: Optional[str] = None
     placed: bool = False                       # True if any order was actually placed
     error: str = ""                            # populated on FAILED
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=_utc_now)
 
     @property
     def succeeded(self) -> bool:
@@ -761,7 +765,7 @@ class Postmortem:
     analysis: str
     rule_change_proposal: str
     human_approved: bool = False
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=_utc_now)
 
     @property
     def proposed_rule_change(self) -> str:

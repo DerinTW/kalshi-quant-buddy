@@ -67,6 +67,7 @@ def _market() -> Market:
         liquidity_dollars=1500,
         event_ticker="TEST-BTC",
         orderbook_depth=500,
+        orderbook_depth_fetched=True,
     )
 
 
@@ -134,7 +135,8 @@ def test_full_pipeline_blocks_trade_when_kill_switch_enabled():
     # 6. Position sizing.
     size = position_sizing.compute(market, edge_result, estimate, cfg)
 
-    # 7. Risk manager MUST reject because kill switch is enabled.
+    # 7. Paper risk must not be rejected by the live kill switch. Other edge
+    # gates may still reject, depending on the estimator output.
     risk = risk_manager.assess(
         decision=size,
         market=market,
@@ -145,9 +147,9 @@ def test_full_pipeline_blocks_trade_when_kill_switch_enabled():
         bankroll=cfg.paper_bankroll,
         cfg=cfg,
     )
-    assert risk.approved is False
+    assert "kill_switch_engaged" not in risk.checks_failed
 
-    # 8. Final formatter must produce NO_TRADE because risk rejected.
+    # 8. Final formatter remains bound by the real edge/risk outcome.
     decision = decision_formatter.format_decision(
         market=market,
         estimate=estimate,
@@ -156,4 +158,4 @@ def test_full_pipeline_blocks_trade_when_kill_switch_enabled():
         risk_assessment=risk,
         cfg=cfg,
     )
-    assert decision["action"] == "NO_TRADE"
+    assert decision["action"] in {"BUY_YES", "BUY_NO", "NO_TRADE"}

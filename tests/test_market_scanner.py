@@ -14,7 +14,8 @@ from config import Config
 class FakeScannerClient:
     def __init__(self, responses: dict[str | None, list[dict]]):
         self.responses = responses
-        self.calls: list[tuple[str, str | None]] = []
+        self.calls: list[tuple[str, str | None, int | None]] = []
+        self.orderbook_calls: list[str] = []
 
     def get_all_markets(
         self,
@@ -25,6 +26,10 @@ class FakeScannerClient:
         self.calls.append((status, category, max_markets))
         response = list(self.responses.get(category, []))
         return response[:max_markets] if max_markets is not None else response
+
+    def get_orderbook(self, ticker: str, depth: int = 10) -> dict:
+        self.orderbook_calls.append(ticker)
+        return {"orderbook": {"yes": {"ask": [[45, 500]], "bid": [[42, 500]]}}}
 
 
 def _cfg(tmp_path: Path, categories: list[str]) -> Config:
@@ -62,6 +67,7 @@ def test_scan_fetches_single_allowlisted_category(tmp_path):
     markets = market_scanner.scan(client, _cfg(tmp_path, ["crypto"]))
 
     assert client.calls == [("open", "crypto", None)]
+    assert client.orderbook_calls == ["KXTEST-26MAY15"]
     assert [market.ticker for market in markets] == ["KXTEST-26MAY15"]
 
 
@@ -76,6 +82,7 @@ def test_scan_fetches_once_per_allowlisted_category(tmp_path):
     markets = market_scanner.scan(client, _cfg(tmp_path, ["crypto", "financial"]))
 
     assert client.calls == [("open", "crypto", None), ("open", "financial", None)]
+    assert client.orderbook_calls == ["KXCRYPTO-26MAY15", "KXFIN-26MAY15"]
     assert {market.ticker for market in markets} == {
         "KXCRYPTO-26MAY15",
         "KXFIN-26MAY15",
@@ -88,6 +95,7 @@ def test_scan_fetches_all_once_when_allowlist_empty(tmp_path):
     markets = market_scanner.scan(client, _cfg(tmp_path, []))
 
     assert client.calls == [("open", None, None)]
+    assert client.orderbook_calls == ["KXTEST-26MAY15"]
     assert [market.ticker for market in markets] == ["KXTEST-26MAY15"]
 
 
@@ -103,6 +111,7 @@ def test_scan_dedupes_duplicate_tickers_across_category_responses(tmp_path):
     markets = market_scanner.scan(client, _cfg(tmp_path, ["crypto", "financial"]))
 
     assert client.calls == [("open", "crypto", None), ("open", "financial", None)]
+    assert client.orderbook_calls == ["KXDUP-26MAY15"]
     assert [market.ticker for market in markets] == ["KXDUP-26MAY15"]
 
 
@@ -122,6 +131,7 @@ def test_scan_falls_back_to_all_markets_when_category_fetches_are_empty(tmp_path
         ("open", "financial", None),
         ("open", None, None),
     ]
+    assert client.orderbook_calls == ["KXFALLBACK-26MAY15"]
     assert [market.ticker for market in markets] == ["KXFALLBACK-26MAY15"]
 
 
@@ -141,6 +151,7 @@ def test_scan_honors_raw_market_fetch_cap_across_categories(tmp_path):
     markets = market_scanner.scan(client, c)
 
     assert client.calls == [("open", "crypto", 2)]
+    assert client.orderbook_calls == ["KXCRYPTO1-26MAY15", "KXCRYPTO2-26MAY15"]
     assert [market.ticker for market in markets] == [
         "KXCRYPTO1-26MAY15",
         "KXCRYPTO2-26MAY15",
@@ -169,6 +180,7 @@ def test_scan_prefilters_blocked_sports_prefix_before_normalize(monkeypatch, tmp
     markets = market_scanner.scan(client, c)
 
     assert [market.ticker for market in markets] == ["KXWEATHER-26MAY15-RAIN"]
+    assert client.orderbook_calls == ["KXWEATHER-26MAY15-RAIN"]
     assert normalized == ["KXWEATHER-26MAY15-RAIN"]
 
 

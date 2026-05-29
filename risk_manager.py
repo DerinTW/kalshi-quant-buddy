@@ -6,7 +6,7 @@ All checks are deterministic — no LLM, no overrides.
 Returns RiskAssessment(approved=True) only when every applicable check passes.
 
 Check order:
-  1. Kill switch (short-circuits immediately)
+  1. Kill switch (short-circuits live immediately; paper/dry-run are allowed)
   2. Valid trading mode
   3. Live-trading enabled when mode == live
   4. Daily loss circuit breaker
@@ -83,12 +83,14 @@ def assess(
         failed.append(label)
 
     # ── Check 1: Kill switch ───────────────────────────────────────────────────
-    if cfg.kill_switch:
+    if cfg.kill_switch and mode == "live":
         return _build(
             decision, mode, approved=False,
-            reason="KILL_SWITCH is enabled — all trading halted",
+            reason="KILL_SWITCH is enabled - live trading halted",
             passed=[], failed=["kill_switch_engaged"],
         )
+    if cfg.kill_switch:
+        ok("kill_switch_live_only: paper/dry_run execution allowed")
 
     # ── Check 2: Valid trading mode ────────────────────────────────────────────
     if mode in _VALID_MODES:

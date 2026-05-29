@@ -3,7 +3,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Generator, Optional
 
 from models import TradeRecord, Postmortem, ResearchItem
@@ -166,8 +166,18 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) 
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _utc_now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return _utc_now().isoformat()
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _json_dumps(value: Any) -> str:
@@ -428,7 +438,7 @@ def close_trade(trade_id: str, exit_price_cents: int, pnl_dollars: float, result
             UPDATE paper_trades
             SET exit_price_cents=?, exit_timestamp=?, pnl_dollars=?, result=?
             WHERE id=?
-        """, (exit_price_cents, datetime.utcnow().isoformat(), pnl_dollars, result, trade_id))
+        """, (exit_price_cents, _utc_now_iso(), pnl_dollars, result, trade_id))
 
 
 def get_open_trades() -> list[TradeRecord]:
@@ -552,8 +562,8 @@ def get_cached_research(
         ).fetchone()
     if not row:
         return None
-    cached_at = datetime.fromisoformat(row["timestamp"])
-    if (datetime.utcnow() - cached_at).total_seconds() / 60 > max_age_minutes:
+    cached_at = _as_aware_utc(datetime.fromisoformat(row["timestamp"]))
+    if (_utc_now() - cached_at).total_seconds() / 60 > max_age_minutes:
         return None
     return _deserialize_items(row["sources"] or "[]")
 
@@ -567,7 +577,7 @@ def set_cached_research(ticker: str, query_hash: str, items: list[ResearchItem])
             ticker, query_hash,
             "",                                     # raw_text col kept for schema compat
             _serialize_items(items),
-            datetime.utcnow().isoformat(),
+            _utc_now_iso(),
         ))
 
 
