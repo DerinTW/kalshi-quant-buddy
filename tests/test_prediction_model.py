@@ -521,6 +521,43 @@ def test_sentiment_shift_capped_at_10pp(monkeypatch, cfg):
     assert out.yes_probability <= 0.52
 
 
+def test_sentiment_shift_compresses_near_probability_boundaries(cfg):
+    huge = make_sentiment(impact=50, direction="supports_yes")
+
+    high_market = make_market(yes_ask=93, yes_bid=91)
+    high_out = pm.estimate(high_market, make_research(), huge, make_weird_move(), cfg)
+    high_p_market = (high_market.yes_ask + high_market.yes_bid) / 2 / 100
+
+    mid_market = make_market(yes_ask=50, yes_bid=48)
+    mid_out = pm.estimate(mid_market, make_research(), huge, make_weird_move(), cfg)
+    mid_p_market = (mid_market.yes_ask + mid_market.yes_bid) / 2 / 100
+
+    assert high_out.confidence_breakdown["probability_blend"] == "logit"
+    assert high_out.yes_probability - high_p_market < 0.015
+    assert mid_out.yes_probability - mid_p_market > 0.02
+
+
+def test_execution_risks_do_not_lower_model_confidence(cfg):
+    market = make_market(
+        liquidity_dollars=100.0,
+        minutes_to_settlement=15,
+    )
+
+    out = pm.estimate(
+        market,
+        make_research(),
+        make_sentiment(direction="neutral", impact=0),
+        make_weird_move(),
+        cfg,
+    )
+
+    assert out.confidence == "medium-high"
+    assert out.confidence_breakdown["execution_risk_penalties"] == [
+        "thin_liquidity",
+        "near_resolution",
+    ]
+
+
 def test_supports_no_sentiment_pulls_estimate_down(cfg):
     """Bearish sentiment with magnitude 5¢ should shift p_research downward."""
     market = make_market(yes_ask=60, yes_bid=58)
@@ -559,9 +596,10 @@ def test_low_confidence_rejected_by_edge_threshold(cfg):
     Wire prediction_model → edge.calculate → edge.passes_threshold.
     A "low" estimate with otherwise tradeable raw edge must be rejected.
     """
-    # Engineer a low-confidence estimate: sparse history + near resolution
-    # + thin liquidity will stack three step-downs on top of the LLM's
-    # medium-high → confidence == "low".
+    # Engineer a low-confidence estimate: sparse history plus a stale-book
+    # artifact stack model/data uncertainty on top of the LLM's medium-high.
+    # Thin liquidity and near-resolution are execution-risk penalties, not
+    # model-confidence penalties.
     market = make_market(
         yes_ask=40, yes_bid=38,
         price_history=[],                  # sparse  → step down
@@ -570,7 +608,8 @@ def test_low_confidence_rejected_by_edge_threshold(cfg):
     )
     # Optimistic sentiment to create a raw edge on YES
     sent = make_sentiment(impact=8, direction="supports_yes")
-    est = pm.estimate(market, make_research(), sent, make_weird_move(), cfg)
+    stale = make_weird_move(flagged=True, classification="stale_book_artifact")
+    est = pm.estimate(market, make_research(), sent, stale, cfg)
     assert est.confidence == "low"
 
     # Run through the edge layer

@@ -15,6 +15,7 @@ Safety guarantees under test:
   - default `main()` (no CLI flags) does NOT start the pipeline
 """
 from __future__ import annotations
+import importlib
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -445,6 +446,34 @@ def test_run_once_limits_candidates(cfg):
     assert summary["markets_passed_filters"] == 10
     # Decisions are recorded only for analyzed candidates
     assert len(summary["decisions"]) == 2
+
+
+def test_run_once_default_candidate_cap_is_not_tiny(cfg, monkeypatch):
+    monkeypatch.delenv("MAX_CANDIDATES_PER_RUN", raising=False)
+    importlib.reload(pipeline)
+    markets = [_market(f"KX{i:02d}") for i in range(10)]
+    deps = _deps(markets=markets, edge=None, sizing=None, risk=None)
+
+    summary = pipeline.run_once(
+        cfg, client=object(), deps=deps, markets_override=markets,
+    )
+
+    assert pipeline._DEFAULT_MAX_CANDIDATES >= 10
+    assert summary["candidates_analyzed"] == 10
+
+
+def test_candidate_selection_prefers_time_adjusted_liquidity(cfg):
+    short = _market("SHORT")
+    short.liquidity_dollars = 4_000.0
+    short.minutes_to_settlement = 24 * 60.0
+
+    long = _market("LONG")
+    long.liquidity_dollars = 6_000.0
+    long.minutes_to_settlement = 4 * 24 * 60.0
+
+    selected = pipeline._select_candidates([long, short], 1, cfg)
+
+    assert [m.ticker for m in selected] == ["SHORT"]
 
 
 # ── 10. One bad market does not crash the whole run ─────────────────────────

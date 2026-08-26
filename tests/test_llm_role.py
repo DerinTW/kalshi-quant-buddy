@@ -164,8 +164,8 @@ def test_llm_probability_cannot_jump_more_than_10pp(monkeypatch, cfg,
     """
     The LLM proposes an extreme yes_probability. The prediction model must
     clamp the LLM's effective contribution to ±10pp from market mid, and the
-    ensemble weight on the LLM is only 5%, so the FULL p_model excursion
-    cannot exceed 0.5pp from p_market in either direction.
+    ensemble weight on the LLM is only 5%, so the full p_model excursion
+    stays bounded by that weighted logit cap.
     """
     def extreme(cfg, *a, **kw):
         return {"yes_probability": llm_says, "confidence": "high",
@@ -180,11 +180,14 @@ def test_llm_probability_cannot_jump_more_than_10pp(monkeypatch, cfg,
 
     # With neutral sentiment, p_research == p_market. The LLM component is
     # the only mover, and its raw value is clamped to p_market ± 0.10. Total
-    # ensemble shift from p_market is bounded by 0.05 * 0.10 = 0.005.
-    max_shift = 0.05 * 0.10 + 1e-9
+    # ensemble shift from p_market is bounded by the weighted logit cap.
+    max_shift = max(
+        abs(pm._sigmoid(pm._logit(p_market) + sign * 0.05 * pm._LLM_LOGIT_SHIFT_CAP) - p_market)
+        for sign in (-1, 1)
+    ) + 1e-9
     assert abs(out.yes_probability - p_market) <= max_shift, (
         f"LLM shifted p_model by {abs(out.yes_probability - p_market):.4f} "
-        f"— must be <= {max_shift:.4f} (5% weight × 10pp cap)"
+        f"— must be <= {max_shift:.4f} (5% weight on logit cap)"
     )
 
 

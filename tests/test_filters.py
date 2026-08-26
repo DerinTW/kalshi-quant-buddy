@@ -413,6 +413,82 @@ def test_enrich_with_orderbook_depth_parses_current_orderbook_fp_shape(monkeypat
 
     assert market.orderbook_depth_fetched is True
     assert market.orderbook_depth == 117
+    assert market.yes_bid == 42
+    assert market.yes_ask == 44
+
+
+def test_enrich_with_orderbook_depth_uses_bulk_orderbooks_when_available(monkeypatch):
+    import market_scanner
+
+    first = valid_market(ticker="KXA", yes_ask=45, yes_bid=42)
+    second = valid_market(ticker="KXB", yes_ask=61, yes_bid=58)
+
+    class BulkClient:
+        def __init__(self):
+            self.bulk_calls = []
+            self.single_calls = []
+
+        def get_orderbooks(self, tickers):
+            self.bulk_calls.append(list(tickers))
+            return {
+                "orderbooks": [
+                    {
+                        "ticker": "KXA",
+                        "orderbook_fp": {
+                            "yes_dollars": [["0.4100", "20.00"]],
+                            "no_dollars": [["0.5700", "140.00"]],
+                        },
+                    },
+                    {
+                        "ticker": "KXB",
+                        "orderbook_fp": {
+                            "yes_dollars": [["0.5800", "150.00"]],
+                            "no_dollars": [["0.4000", "30.00"]],
+                        },
+                    },
+                ]
+            }
+
+        def get_orderbook(self, ticker, depth=10):
+            self.single_calls.append(ticker)
+            raise AssertionError("single orderbook endpoint should not be used")
+
+    client = BulkClient()
+
+    market_scanner.enrich_with_orderbook_depth(
+        [first, second], client, depth=10, delay_seconds=0.0
+    )
+
+    assert client.bulk_calls == [["KXA", "KXB"]]
+    assert client.single_calls == []
+    assert first.orderbook_depth == 140
+    assert second.orderbook_depth == 150
+    assert first.yes_bid == 41
+    assert first.yes_ask == 43
+    assert second.yes_bid == 58
+    assert second.yes_ask == 60
+    assert first.fetched_at == second.fetched_at
+
+
+def test_enrich_with_orderbook_depth_marks_missing_bulk_book_unsafe(monkeypatch):
+    import market_scanner
+
+    market = valid_market(ticker="KXMISSING", orderbook_depth_fetched=False)
+
+    class BulkClient:
+        def get_orderbooks(self, tickers):
+            return {"orderbooks": []}
+
+        def get_orderbook(self, ticker, depth=10):
+            raise AssertionError("bulk response handled without fallback")
+
+    market_scanner.enrich_with_orderbook_depth(
+        [market], BulkClient(), depth=10, delay_seconds=0.0
+    )
+
+    assert market.orderbook_depth_fetched is False
+    assert market.is_unsafe is True
+    assert market.unsafe_reason.startswith("orderbook_fetch_failed:")
 
 
 def test_enrich_with_orderbook_depth_supports_legacy_bid_only_orderbook(monkeypatch):

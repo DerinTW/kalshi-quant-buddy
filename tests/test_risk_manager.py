@@ -230,7 +230,7 @@ def test_default_config_has_safe_defaults(monkeypatch):
         ({"s": sizing(dollars=6.0)}, "bankroll_pct_exceeded"),
         ({"category_exposure": 25.01}, "category_exposure_cap"),
         ({"correlated_exposure": 15.01}, "correlated_exposure_cap"),
-        ({"m": market(side_spread=7)}, "spread_too_wide"),
+        ({"m": market(side_spread=7), "e": edge_result(spread_cents=7)}, "spread_too_wide"),
         ({"m": market(liquidity_dollars=499.0)}, "insufficient_liquidity"),
         ({"s": sizing(contracts=0)}, "non_positive_contracts"),
         ({"s": sizing(dollars=0.0)}, "non_positive_dollars"),
@@ -238,6 +238,25 @@ def test_default_config_has_safe_defaults(monkeypatch):
 )
 def test_hard_reject_gates(kwargs, token):
     assert_rejected(assess(**kwargs), token)
+
+
+def test_spread_gate_uses_selected_no_side_spread():
+    decision = assess(
+        m=market(side_spread=20),
+        s=sizing(side="NO", entry_price_cents=25),
+        e=edge_result(
+            side="NO",
+            entry_price_cents=25,
+            spread_cents=1,
+            raw_edge_pct=12.0,
+            adjusted_edge_pct=8.0,
+            adjusted_ev=0.08,
+            confidence_adjusted_ev=0.072,
+            confidence_adjusted_edge_pct=7.2,
+        ),
+    )
+
+    assert decision.approved is True
 
 
 def test_duplicate_ticker_and_side_rejects():

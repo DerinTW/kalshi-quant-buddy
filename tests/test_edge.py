@@ -126,6 +126,30 @@ def test_slippage_lowers_adjusted_edge_and_ev():
     assert with_slip.adjusted_edge_pct == pytest.approx(no_slip.adjusted_edge_pct - 2.0)
 
 
+def test_dynamic_slippage_steps_down_for_high_confidence_deep_books():
+    m = market(yes_ask=40, yes_bid=39, no_ask=80, no_bid=79)
+    m.orderbook_depth = 500
+    m.liquidity_dollars = 20_000
+
+    result = edge.calculate(m, estimate(0.60, "high"), cfg(slippage_cents=2))
+
+    assert result is not None
+    assert result.side == "YES"
+    assert result.slippage_cost_cents == pytest.approx(0.5)
+    assert result.adjusted_ev == pytest.approx(0.60 - 0.40 - (1 / 200) - 0.005)
+
+
+def test_dynamic_slippage_uses_one_cent_for_medium_high_good_books():
+    m = market(yes_ask=40, yes_bid=39, no_ask=80, no_bid=79)
+    m.orderbook_depth = 100
+    m.liquidity_dollars = 5_000
+
+    result = edge.calculate(m, estimate(0.60, "medium-high"), cfg(slippage_cents=2))
+
+    assert result is not None
+    assert result.slippage_cost_cents == pytest.approx(1.0)
+
+
 def test_fees_lower_adjusted_edge_and_ev():
     m = market(yes_ask=40, yes_bid=39, no_ask=65, no_bid=64)
     no_fee = edge.calculate(m, estimate(0.60), cfg(fee_pct=0.0))
@@ -147,6 +171,40 @@ def test_spread_cost_is_spread_cents_divided_by_200():
     assert result.raw_edge_pct == pytest.approx(20.0)
     assert result.adjusted_ev == pytest.approx(0.20 - (4 / 200))
     assert result.adjusted_edge_pct == pytest.approx(18.0)
+    assert result.spread_cost_pct == pytest.approx(2.0)
+    assert result.spread_cost_of_entry_pct == pytest.approx(5.0)
+
+
+def test_synthetic_fair_mid_is_reported_separately_from_executable_edge():
+    result = edge.calculate(
+        market(yes_ask=45, yes_bid=38, no_ask=60, no_bid=58),
+        estimate(0.50),
+        cfg(),
+    )
+
+    assert result is not None
+    assert result.side == "YES"
+    assert result.raw_edge_pct == pytest.approx(5.0)       # executable: 50% - 45%
+    assert result.fair_yes_prob == pytest.approx(0.40)    # (38 + (100 - 58)) / 200
+    assert result.fair_side_prob == pytest.approx(0.40)
+    assert result.model_vs_market_edge_pct == pytest.approx(10.0)
+    assert result.synthetic_spread_cents == 4
+
+
+def test_relative_spread_gate_rejects_low_price_wide_books():
+    result = edge.calculate(
+        market(yes_ask=5, yes_bid=1, no_ask=96, no_bid=95),
+        estimate(0.50, "high"),
+        cfg(max_spread_cents_edge=6, min_confidence_adjusted_edge_cents=1.0),
+    )
+
+    assert result is not None
+    assert result.spread_cents == 4
+    assert result.spread_cost_of_entry_pct == pytest.approx(40.0)
+    assert edge.passes_threshold(
+        result,
+        cfg(max_spread_cents_edge=6, min_confidence_adjusted_edge_cents=1.0),
+    ) is False
 
 
 def test_confidence_adjusted_edge_decreases_with_lower_confidence():
@@ -253,6 +311,32 @@ def test_chooses_better_adjusted_side_when_both_yes_and_no_are_positive():
     assert result is not None
     assert result.side == "YES"
     assert result.adjusted_edge_pct == pytest.approx(13.0)
+
+
+def test_routes_to_inverse_side_when_preferred_side_fails_thresholds():
+    result = edge.calculate(
+        market(yes_ask=70, yes_bid=50, no_ask=5, no_bid=4),
+        estimate(0.90, "high"),
+        cfg(
+            min_edge_pct=4.0,
+            min_adjusted_edge_pct=2.0,
+            min_confidence_adjusted_edge_cents=1.0,
+            max_spread_cents_edge=6,
+        ),
+    )
+
+    assert result is not None
+    assert result.side == "NO"
+    assert result.entry_price_cents == 5
+    assert edge.passes_threshold(
+        result,
+        cfg(
+            min_edge_pct=4.0,
+            min_adjusted_edge_pct=2.0,
+            min_confidence_adjusted_edge_cents=1.0,
+            max_spread_cents_edge=6,
+        ),
+    ) is True
 
 
 def test_probability_and_ev_fields_are_sane_and_bounded():

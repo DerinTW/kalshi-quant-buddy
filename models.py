@@ -519,6 +519,13 @@ class EdgeResult:
     confidence_adjusted_ev: float = 0.0          # adjusted_ev * confidence_weight (decimal)
     confidence_adjusted_edge_pct: float = 0.0    # adjusted_edge_pct * confidence_weight (pp)
     spread_cents: int = 0           # spread of the entry side
+    slippage_cost_cents: float = 0.0              # effective slippage reserve in cents
+    fair_yes_prob: float | None = None             # synchronized YES fair mid, if available
+    fair_side_prob: float | None = None            # fair mid for the chosen side
+    model_vs_market_edge_pct: float | None = None  # estimated - fair_side_prob, in pp
+    spread_cost_pct: float = 0.0                   # half-spread reserve, in pp
+    spread_cost_of_entry_pct: float = 0.0          # half-spread as % of entry capital
+    synthetic_spread_cents: int | None = None      # 100 - (YES bid + NO bid), if available
 
     def to_dict(self) -> dict:
         return {
@@ -535,6 +542,29 @@ class EdgeResult:
             "confidence_adjusted_ev":       round(self.confidence_adjusted_ev, 6),
             "confidence_adjusted_edge_pct": round(self.confidence_adjusted_edge_pct, 4),
             "spread_cents":                 int(self.spread_cents),
+            "slippage_cost_cents":           round(float(self.slippage_cost_cents), 4),
+            "fair_yes_prob": (
+                round(_clamp01(self.fair_yes_prob), 6)
+                if self.fair_yes_prob is not None
+                else None
+            ),
+            "fair_side_prob": (
+                round(_clamp01(self.fair_side_prob), 6)
+                if self.fair_side_prob is not None
+                else None
+            ),
+            "model_vs_market_edge_pct": (
+                round(self.model_vs_market_edge_pct, 4)
+                if self.model_vs_market_edge_pct is not None
+                else None
+            ),
+            "spread_cost_pct":              round(self.spread_cost_pct, 4),
+            "spread_cost_of_entry_pct":     round(self.spread_cost_of_entry_pct, 4),
+            "synthetic_spread_cents": (
+                int(self.synthetic_spread_cents)
+                if self.synthetic_spread_cents is not None
+                else None
+            ),
         }
 
 

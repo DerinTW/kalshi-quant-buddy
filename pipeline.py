@@ -67,9 +67,11 @@ def _env_int(name: str, default: int) -> int:
 
 
 # Hard, deterministic caps. These apply on top of any cfg limits and cannot
-# be relaxed by the LLM or by individual market signals.
-_DEFAULT_MAX_CANDIDATES = _env_int("MAX_CANDIDATES_PER_RUN", 3)
-_DEFAULT_MAX_RESEARCH = _env_int("MAX_RESEARCH_MARKETS_PER_RUN", 3)
+# be relaxed by the LLM or by individual market signals. Candidate evaluation
+# is mostly deterministic scoring, so keep this broad enough that structural
+# filters, not a tiny fallback cap, do the first serious narrowing.
+_DEFAULT_MAX_CANDIDATES = _env_int("MAX_CANDIDATES_PER_RUN", 25)
+_DEFAULT_MAX_RESEARCH = _env_int("MAX_RESEARCH_MARKETS_PER_RUN", 15)
 
 
 # ── Dependency injection (for tests) ─────────────────────────────────────────
@@ -186,7 +188,7 @@ def run_once(
     # Prefer markets with sane liquidity and short time-to-resolution among
     # those that passed the filters. We use simple deterministic sorting,
     # no LLM ranking.
-    candidates = _select_candidates(passed, cap_candidates)
+    candidates = _select_candidates(passed, cap_candidates, cfg)
     logger.info(_MODULE, "candidates_selected",
                 count=len(candidates),
                 tickers=[m.ticker for m in candidates])
@@ -382,22 +384,28 @@ def _coerce_positive_int(value: Optional[int], default: int) -> int:
         return max(0, int(default))
 
 
-def _select_candidates(passed: list[Market], cap: int) -> list[Market]:
+def _select_candidates(passed: list[Market], cap: int, cfg: Config) -> list[Market]:
     """
     Deterministic candidate selection: prefer markets with the most
-    liquidity, then the shortest time-to-resolution. No LLM ranking.
+    time-adjusted liquidity, then the shortest time-to-resolution.
+    No LLM ranking.
     """
     if cap <= 0 or not passed:
         return []
     ranked = sorted(
         passed,
         key=lambda m: (
-            -float(getattr(m, "liquidity_dollars", 0.0) or 0.0),
+            -_time_adjusted_liquidity(m, cfg),
             float(getattr(m, "minutes_to_settlement", 0.0) or 0.0),
             m.ticker,  # stable tiebreak
         ),
     )
     return ranked[:cap]
+
+
+def _time_adjusted_liquidity(market: Market, cfg: Config) -> float:
+    liquidity = float(getattr(market, "liquidity_dollars", 0.0) or 0.0)
+    return liquidity * position_sizing.time_to_resolution_size_multiplier(market, cfg)
 
 
 def _group_by_event(markets: list[Market]) -> dict[str, list[Market]]:

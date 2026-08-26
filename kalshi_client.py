@@ -163,6 +163,9 @@ class KalshiClient:
     def get_orderbook(self, ticker: str, depth: int = 10) -> dict[str, Any]:
         return self._get(f"/markets/{ticker}/orderbook", params={"depth": depth})
 
+    def get_orderbooks(self, tickers: list[str]) -> dict[str, Any]:
+        return self._get("/markets/orderbooks", params={"tickers": tickers})
+
     def get_market_history(self, ticker: str, limit: int = 100) -> dict[str, Any]:
         """Recent trade history for a market (used for anomaly detection)."""
         return self._get(f"/markets/{ticker}/history", params={"limit": limit})

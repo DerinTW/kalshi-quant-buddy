@@ -25,6 +25,7 @@ _MODULE = "market_scanner"
 
 _UNKNOWN_TIME = datetime(9999, 12, 31, tzinfo=timezone.utc)
 _STALE_PRICE_HOURS = 6
+_ORDERBOOK_BATCH_SIZE = 100
 _EVENT_SUFFIX = re.compile(r"^[BTbt]?\d")
 _CATEGORY_ALIASES: dict[str, str] = {
     "climate and weather": "weather",
@@ -350,25 +351,38 @@ def enrich_with_orderbook_depth(
     delay_seconds: float = 0.15,
 ) -> None:
     """
-    Fetch the live orderbook for each market and compute top-of-book depth.
+    Fetch live orderbooks and compute top-of-book depth.
     Depth = max contracts available at the best YES-bid / implied-YES-ask.
     Kalshi REST orderbooks return bids only: a NO bid is the executable YES
-    ask. Sets market.orderbook_depth in-place. Failures leave the previous
-    depth, keep orderbook_depth_fetched=False, and mark the market unsafe so
-    filters drop it before downstream analysis.
+    ask. When the client supports bulk orderbooks, snapshots are fetched in
+    batches so price, spread, and depth come from the same recent book. Failures
+    leave the previous depth, keep orderbook_depth_fetched=False, and mark the
+    market unsafe so filters drop it before downstream analysis.
     Call after cheap raw/structural screening and before any downstream
     analysis that depends on a trustworthy depth gate.
     """
+    if not markets:
+        return
+
+    bulk_fn = getattr(client, "get_orderbooks", None)
+    if callable(bulk_fn):
+        try:
+            _enrich_with_bulk_orderbooks(markets, bulk_fn)
+            return
+        except Exception as exc:
+            logger.warn(
+                _MODULE,
+                "bulk_orderbook_fetch_failed",
+                msg="falling back to per-market orderbook fetches",
+                err=str(exc),
+            )
+
     for i, market in enumerate(markets):
         try:
             ob_data = client.get_orderbook(market.ticker, depth=depth)
-            market.orderbook_depth = _parse_orderbook_top_depth(ob_data)
-            market.orderbook_depth_fetched = True
-            market.fetched_at = datetime.now(timezone.utc)
+            _apply_orderbook_snapshot(market, ob_data, datetime.now(timezone.utc))
         except Exception as exc:
-            if not market.is_unsafe:
-                market.is_unsafe = True
-                market.unsafe_reason = f"orderbook_fetch_failed: {str(exc)[:200]}"
+            _mark_orderbook_failed(market, exc)
             code = getattr(getattr(exc, "response", None), "status_code", None)
             if code == 429:
                 logger.warn(_MODULE, "rate_limited_orderbook", ticker=market.ticker,
@@ -380,6 +394,158 @@ def enrich_with_orderbook_depth(
 
         if delay_seconds > 0 and i < len(markets) - 1:
             time.sleep(delay_seconds)
+
+
+def _enrich_with_bulk_orderbooks(markets: list[Market], bulk_fn: Any) -> None:
+    for chunk in _chunks(markets, _ORDERBOOK_BATCH_SIZE):
+        tickers = [market.ticker for market in chunk]
+        response = bulk_fn(tickers)
+        fetched_at = datetime.now(timezone.utc)
+        books = _orderbooks_by_ticker(response)
+
+        for market in chunk:
+            ob_data = books.get(market.ticker)
+            if ob_data is None:
+                exc = ValueError("orderbook_missing_from_bulk_response")
+                _mark_orderbook_failed(market, exc)
+                logger.warn(
+                    _MODULE,
+                    "bulk_orderbook_missing",
+                    ticker=market.ticker,
+                    err=str(exc),
+                )
+                continue
+
+            try:
+                _apply_orderbook_snapshot(market, ob_data, fetched_at)
+            except Exception as exc:
+                _mark_orderbook_failed(market, exc)
+                logger.warn(
+                    _MODULE,
+                    "bulk_orderbook_parse_failed",
+                    ticker=market.ticker,
+                    err=str(exc),
+                )
+
+
+def _chunks(markets: list[Market], size: int) -> list[list[Market]]:
+    return [markets[i:i + size] for i in range(0, len(markets), size)]
+
+
+def _orderbooks_by_ticker(response: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(response, dict):
+        raise ValueError("bulk_orderbook_response_not_object")
+
+    raw_books = response.get("orderbooks")
+    if not isinstance(raw_books, list):
+        raise ValueError("bulk_orderbook_list_missing")
+
+    books: dict[str, dict[str, Any]] = {}
+    for raw in raw_books:
+        if not isinstance(raw, dict):
+            continue
+        ticker = str(raw.get("ticker") or "").strip()
+        if ticker:
+            books[ticker] = raw
+    return books
+
+
+def _apply_orderbook_snapshot(market: Market, ob_data: dict[str, Any], fetched_at: datetime) -> None:
+    market.orderbook_depth = _parse_orderbook_top_depth(ob_data)
+    _apply_orderbook_prices(market, ob_data)
+    market.orderbook_depth_fetched = True
+    market.fetched_at = fetched_at
+
+
+def _apply_orderbook_prices(market: Market, raw: dict[str, Any]) -> None:
+    quote = _parse_orderbook_yes_quote(raw)
+    if quote is None:
+        _compute_derived(market)
+        return
+
+    yes_bid, yes_ask = quote
+    if yes_bid > 0:
+        market.yes_bid = yes_bid
+        market.no_ask = 100 - yes_bid
+    if yes_ask > 0:
+        market.yes_ask = yes_ask
+        market.no_bid = 100 - yes_ask
+    _compute_derived(market)
+
+
+def _parse_orderbook_yes_quote(raw: Any) -> Optional[tuple[int, int]]:
+    if not isinstance(raw, dict):
+        raise ValueError("orderbook_response_not_object")
+
+    if isinstance(raw.get("orderbook_fp"), dict):
+        ob_fp = raw["orderbook_fp"]
+        yes_bid = _best_level_price_cents(ob_fp.get("yes_dollars"), best_at_end=True, dollars=True)
+        no_bid = _best_level_price_cents(ob_fp.get("no_dollars"), best_at_end=True, dollars=True)
+        yes_ask = 100 - no_bid if no_bid > 0 else 0
+        return yes_bid, yes_ask
+
+    ob = raw.get("orderbook", raw)
+    if not isinstance(ob, dict):
+        raise ValueError("orderbook_container_not_object")
+
+    yes = ob.get("yes")
+    no = ob.get("no")
+    if isinstance(yes, list) or isinstance(no, list):
+        yes_bid = _best_level_price_cents(yes, best_at_end=True, dollars=False)
+        no_bid = _best_level_price_cents(no, best_at_end=True, dollars=False)
+        yes_ask = 100 - no_bid if no_bid > 0 else 0
+        return yes_bid, yes_ask
+
+    if isinstance(yes, dict) or isinstance(no, dict):
+        yes_dict = yes if isinstance(yes, dict) else {}
+        no_dict = no if isinstance(no, dict) else {}
+        yes_bid = _best_level_price_cents(
+            yes_dict.get("bid") or yes_dict.get("bids"),
+            best_at_end=False,
+            dollars=False,
+        )
+        yes_ask = _best_level_price_cents(
+            yes_dict.get("ask") or yes_dict.get("asks"),
+            best_at_end=False,
+            dollars=False,
+        )
+        if yes_bid <= 0:
+            no_ask = _best_level_price_cents(
+                no_dict.get("ask") or no_dict.get("asks"),
+                best_at_end=False,
+                dollars=False,
+            )
+            yes_bid = 100 - no_ask if no_ask > 0 else 0
+        if yes_ask <= 0:
+            no_bid = _best_level_price_cents(
+                no_dict.get("bid") or no_dict.get("bids"),
+                best_at_end=False,
+                dollars=False,
+            )
+            yes_ask = 100 - no_bid if no_bid > 0 else 0
+        return yes_bid, yes_ask
+
+    return None
+
+
+def _best_level_price_cents(levels: Any, *, best_at_end: bool, dollars: bool) -> int:
+    if levels is None:
+        return 0
+    if not isinstance(levels, list):
+        raise ValueError("orderbook_levels_not_list")
+    if not levels:
+        return 0
+
+    price = _level_price(levels[-1] if best_at_end else levels[0])
+    if dollars:
+        price *= Decimal("100")
+    return int(round(float(price)))
+
+
+def _mark_orderbook_failed(market: Market, exc: Exception) -> None:
+    if not market.is_unsafe:
+        market.is_unsafe = True
+        market.unsafe_reason = f"orderbook_fetch_failed: {str(exc)[:200]}"
 
 
 def _parse_orderbook_top_depth(raw: Any) -> int:

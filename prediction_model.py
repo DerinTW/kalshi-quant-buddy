@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 from typing import Any, Optional
 
 import features
@@ -40,6 +41,13 @@ _SENTIMENT_SHIFT_CAP_PP = 0.10     # ±10pp
 # LLM cap on adjustment from market price.
 _LLM_SHIFT_CAP_PP = 0.10           # ±10pp
 
+_SENTIMENT_LOGIT_SHIFT_CAP = math.log(
+    (0.5 + _SENTIMENT_SHIFT_CAP_PP) / (0.5 - _SENTIMENT_SHIFT_CAP_PP)
+)
+_LLM_LOGIT_SHIFT_CAP = math.log(
+    (0.5 + _LLM_SHIFT_CAP_PP) / (0.5 - _LLM_SHIFT_CAP_PP)
+)
+
 # Confidence step-down thresholds
 _THIN_LIQUIDITY_USD       = 500.0      # below → step down once
 _NEAR_RESOLUTION_MIN      = 30.0       # minutes_to_settlement below → step down once
@@ -69,6 +77,49 @@ def _step_down(confidence: str, steps: int = 1) -> str:
 
 def _clamp(v: float, lo: float = 0.01, hi: float = 0.99) -> float:
     return max(lo, min(hi, v))
+
+
+def _logit(p: float) -> float:
+    p = _clamp(p)
+    return math.log(p / (1.0 - p))
+
+
+def _sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
+
+def _prob_shift_to_logit_delta(shift: float) -> float:
+    capped = max(-_SENTIMENT_SHIFT_CAP_PP, min(_SENTIMENT_SHIFT_CAP_PP, shift))
+    delta = _logit(0.5 + capped) - _logit(0.5)
+    return max(-_SENTIMENT_LOGIT_SHIFT_CAP, min(_SENTIMENT_LOGIT_SHIFT_CAP, delta))
+
+
+def _apply_logit_delta(p_market: float, delta: float) -> float:
+    return _clamp(_sigmoid(_logit(p_market) + delta))
+
+
+def _blend_logit(
+    *,
+    p_market: float,
+    p_research: float,
+    p_llm: float,
+    p_base: Optional[float],
+    base_rate_used: bool,
+) -> float:
+    if base_rate_used and p_base is not None:
+        logit_model = (
+            _W_MARKET_WITH_BASE_RATE * _logit(p_market)
+            + _W_RESEARCH * _logit(p_research)
+            + _W_LLM * _logit(p_llm)
+            + _W_BASE_RATE * _logit(p_base)
+        )
+    else:
+        logit_model = (
+            _W_MARKET * _logit(p_market)
+            + _W_RESEARCH * _logit(p_research)
+            + _W_LLM * _logit(p_llm)
+        )
+    return _clamp(_sigmoid(logit_model))
 
 
 def _signed_sentiment_shift(sentiment: Optional[SentimentResult]) -> float:
@@ -154,7 +205,8 @@ def _estimate_impl(
 
     # ── Component 2: sentiment-shifted price (signed, capped) ────────────
     sentiment_shift = _signed_sentiment_shift(sentiment)
-    p_research = _clamp(p_market + sentiment_shift)
+    sentiment_logit_delta = _prob_shift_to_logit_delta(sentiment_shift)
+    p_research = _apply_logit_delta(p_market, sentiment_logit_delta)
 
     # ── Component 3: LLM, capped ±10pp from market ───────────────────────
     p_llm, llm_confidence, reasoning, assumptions, invalidations = _llm_component(
@@ -163,19 +215,13 @@ def _estimate_impl(
     p_base, base_rate_used, base_rate_reason = _base_rate_component(base_rate_signal)
 
     # ── Ensemble blend ───────────────────────────────────────────────────
-    if base_rate_used and p_base is not None:
-        p_model = _clamp(
-            _W_MARKET_WITH_BASE_RATE * p_market
-            + _W_RESEARCH * p_research
-            + _W_LLM * p_llm
-            + _W_BASE_RATE * p_base
-        )
-    else:
-        p_model = _clamp(
-            _W_MARKET   * p_market
-            + _W_RESEARCH * p_research
-            + _W_LLM      * p_llm
-        )
+    p_model = _blend_logit(
+        p_market=p_market,
+        p_research=p_research,
+        p_llm=p_llm,
+        p_base=p_base,
+        base_rate_used=base_rate_used,
+    )
 
     # ── Rule-layer confidence step-downs ─────────────────────────────────
     breakdown: dict[str, Any] = {
@@ -190,9 +236,14 @@ def _estimate_impl(
         "signal_clarity": _research_signal_clarity(research, sentiment),
         "contradiction_penalty": 0,
         "market_structure_penalties": [],
+        "execution_risk_penalties": [],
+        "model_uncertainty_penalties": [],
+        "evidence_quality_penalties": [],
         "floor_applied": "",
         "base_rate": base_rate_signal.to_dict() if base_rate_signal else None,
         "base_rate_reason": base_rate_reason,
+        "probability_blend": "logit",
+        "sentiment_logit_delta": round(sentiment_logit_delta, 6),
     }
     confidence = llm_confidence
     confidence = _apply_microstructure_stepdowns(market, confidence, breakdown)
@@ -309,9 +360,10 @@ def _llm_component(
             sentiment_payload,
         )
         raw_llm = _clamp(float(data.get("yes_probability", p_market)))
-        # Defense in depth: cap LLM adjustment to ±10pp from market price
-        delta = max(-_LLM_SHIFT_CAP_PP, min(_LLM_SHIFT_CAP_PP, raw_llm - p_market))
-        p_llm = _clamp(p_market + delta)
+        # Defense in depth: cap LLM adjustment as log-odds evidence.
+        raw_delta = _logit(raw_llm) - _logit(p_market)
+        delta = max(-_LLM_LOGIT_SHIFT_CAP, min(_LLM_LOGIT_SHIFT_CAP, raw_delta))
+        p_llm = _apply_logit_delta(p_market, delta)
         cand = data.get("confidence", "low")
         llm_confidence = cand if cand in CONFIDENCE_WEIGHTS else "low"
         reasoning = data.get("reasoning", "")
@@ -330,22 +382,23 @@ def _apply_microstructure_stepdowns(
     confidence: str,
     breakdown: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Liquidity, time-to-resolution, and history-depth gates."""
+    """Execution risk and history-depth gates."""
     if market.liquidity_dollars < _THIN_LIQUIDITY_USD:
-        confidence = _step_down(confidence)
         if breakdown is not None:
+            breakdown["execution_risk_penalties"].append("thin_liquidity")
             breakdown["market_structure_penalties"].append("thin_liquidity")
         logger.debug(_MODULE, "thin_liquidity", ticker=market.ticker,
                      liquidity_usd=market.liquidity_dollars)
     if market.minutes_to_settlement < _NEAR_RESOLUTION_MIN:
-        confidence = _step_down(confidence)
         if breakdown is not None:
+            breakdown["execution_risk_penalties"].append("near_resolution")
             breakdown["market_structure_penalties"].append("near_resolution")
         logger.debug(_MODULE, "near_resolution", ticker=market.ticker,
                      minutes_to_settlement=market.minutes_to_settlement)
     if len(market.price_history) < _SPARSE_HISTORY_TICKS:
         confidence = _step_down(confidence)
         if breakdown is not None:
+            breakdown["model_uncertainty_penalties"].append("sparse_history")
             breakdown["market_structure_penalties"].append("sparse_history")
         logger.debug(_MODULE, "sparse_history", ticker=market.ticker,
                      ticks=len(market.price_history))
@@ -363,6 +416,7 @@ def _apply_feature_stepdowns(
     if fv.historical_volatility > _HIGH_VOLATILITY_CENTS:
         confidence = _step_down(confidence)
         if breakdown is not None:
+            breakdown["model_uncertainty_penalties"].append("high_volatility")
             breakdown["market_structure_penalties"].append("high_volatility")
         logger.debug(_MODULE, "high_volatility", ticker=market.ticker,
                      hist_vol=f"{fv.historical_volatility:.2f}")
@@ -376,6 +430,7 @@ def _apply_feature_stepdowns(
         if disagreement > _NEIGHBOR_DISAGREE_PROB:
             confidence = _step_down(confidence)
             if breakdown is not None:
+                breakdown["model_uncertainty_penalties"].append("neighbor_disagreement")
                 breakdown["market_structure_penalties"].append("neighbor_disagreement")
             logger.debug(_MODULE, "neighbor_disagreement",
                          ticker=market.ticker,
@@ -404,6 +459,7 @@ def _apply_sentiment_research_stepdowns(
     if sentiment is None:
         confidence = _step_down(confidence)
         if breakdown is not None:
+            breakdown["evidence_quality_penalties"].append("missing_sentiment")
             breakdown["market_structure_penalties"].append("missing_sentiment")
         logger.debug(_MODULE, "missing_sentiment_stepdown", ticker=ticker)
         return confidence
@@ -411,6 +467,7 @@ def _apply_sentiment_research_stepdowns(
     if getattr(sentiment, "item_count", 0) == 0:
         confidence = _step_down(confidence)
         if breakdown is not None:
+            breakdown["evidence_quality_penalties"].append("missing_research")
             breakdown["market_structure_penalties"].append("missing_research")
         logger.debug(_MODULE, "missing_research_stepdown", ticker=ticker)
 
@@ -420,6 +477,7 @@ def _apply_sentiment_research_stepdowns(
     if sentiment.rumor_risk in ("medium", "high"):
         confidence = _step_down(confidence)
         if breakdown is not None:
+            breakdown["evidence_quality_penalties"].append(f"rumor_risk_{sentiment.rumor_risk}")
             breakdown["market_structure_penalties"].append(f"rumor_risk_{sentiment.rumor_risk}")
         logger.debug(_MODULE, "rumor_risk_stepdown",
                      ticker=ticker, rumor_risk=sentiment.rumor_risk)
@@ -429,6 +487,7 @@ def _apply_sentiment_research_stepdowns(
         confidence = _step_down(confidence)
         if breakdown is not None:
             breakdown["contradiction_penalty"] = len(sentiment.major_contradictions)
+            breakdown["evidence_quality_penalties"].append("contradictions")
         logger.debug(_MODULE, "contradictions_stepdown",
                      ticker=ticker,
                      contradictions=len(sentiment.major_contradictions))
@@ -448,10 +507,21 @@ def _apply_weird_move_stepdowns(
     """
     if weird_move is None or not weird_move.flagged:
         return confidence
+    if weird_move.classification == "liquidity_gap_move":
+        if breakdown is not None:
+            breakdown["execution_risk_penalties"].append("weird_move_liquidity_gap_move")
+            breakdown["market_structure_penalties"].append("weird_move_liquidity_gap_move")
+        logger.debug(_MODULE, "weird_move_execution_risk",
+                     ticker=ticker,
+                     classification=weird_move.classification)
+        return confidence
     steps = _WEIRD_MOVE_STEPS.get(weird_move.classification, 0)
     if steps > 0:
         new_conf = _step_down(confidence, steps)
         if breakdown is not None:
+            breakdown["model_uncertainty_penalties"].append(
+                f"weird_move_{weird_move.classification}"
+            )
             breakdown["market_structure_penalties"].append(
                 f"weird_move_{weird_move.classification}"
             )

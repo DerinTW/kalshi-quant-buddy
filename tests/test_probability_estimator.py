@@ -213,8 +213,12 @@ def test_extreme_spec_output_still_capped_in_prediction_model(monkeypatch, cfg):
         _quiet_weird_move(), cfg,
     )
     p_market = (50 + 48) / 2 / 100  # 0.49
-    # 5% LLM weight × 10pp cap = 0.5pp maximum total shift
-    assert abs(out.yes_probability - p_market) <= 0.05 * 0.10 + 1e-9
+    # LLM evidence is capped in log-odds space and then weighted at 5%.
+    max_shift = max(
+        abs(pm._sigmoid(pm._logit(p_market) + sign * 0.05 * pm._LLM_LOGIT_SHIFT_CAP) - p_market)
+        for sign in (-1, 1)
+    ) + 1e-9
+    assert abs(out.yes_probability - p_market) <= max_shift
 
 
 # ── D. Social-only caution ───────────────────────────────────────────────────

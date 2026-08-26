@@ -90,7 +90,9 @@ def test_env_example_contains_safe_defaults():
     assert _env_value(text, "MAX_TRADE_DOLLARS") == "10"
     assert _env_value(text, "MAX_DAILY_LOSS") == "20"
     assert _env_value(text, "MAX_TRADES_PER_DAY") == "5"
+    assert _env_value(text, "TIME_TO_RESOLUTION_SIZE_FLOOR_DAYS") == "1.0"
     assert _env_value(text, "MAX_SPREAD_CENTS") == "10"
+    assert _env_value(text, "MAX_SPREAD_COST_OF_ENTRY_PCT_EDGE") == "20"
     assert _env_value(text, "MIN_LIQUIDITY") == "25"
     assert _env_value(text, "MIN_LIQUIDITY_DOLLARS") == "25"
     assert "LIVE_MAX_SPREAD_CENTS=6" in text

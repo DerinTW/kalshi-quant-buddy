@@ -181,7 +181,7 @@ def assess(
         )
 
     # ── Check 10: Spread gate (absolute cents) ─────────────────────────────────
-    spread_cents = market.yes_ask - market.yes_bid
+    spread_cents = edge.spread_cents
     if spread_cents > cfg.max_spread_cents:
         fail(
             f"spread_too_wide: {spread_cents}¢ > {cfg.max_spread_cents}¢"

@@ -51,11 +51,17 @@ def clear_safety_env(monkeypatch):
         "MAX_SPREAD_CENTS",
         "MAX_SPREAD_PCT",
         "MIN_LIQUIDITY",
+        "MIN_LIQUIDITY_DOLLARS",
         "MIN_ORDERBOOK_DEPTH_AT_LIMIT",
         "MIN_EDGE_PCT",
         "MIN_ADJUSTED_EDGE_PCT",
         "MAX_SPREAD_CENTS_EDGE",
+        "MAX_SPREAD_COST_OF_ENTRY_PCT_EDGE",
         "MIN_CONFIDENCE_ADJUSTED_EDGE_CENTS",
+        "SLIPPAGE_CENTS",
+        "TIME_TO_RESOLUTION_SIZE_FLOOR_DAYS",
+        "MAX_CANDIDATES_PER_RUN",
+        "MAX_RESEARCH_MARKETS_PER_RUN",
         "CATEGORY_ALLOWLIST",
         "BLOCKED_EVENT_PREFIXES",
     ):
@@ -86,8 +92,11 @@ def test_config_default_safety_values():
     assert c.min_orderbook_depth_at_limit == 25
     assert c.min_edge_pct == 4
     assert c.min_adjusted_edge_pct == 2
+    assert c.slippage_cents == 2
     assert c.max_spread_cents_edge == 10
+    assert c.max_spread_cost_of_entry_pct_edge == 20
     assert c.min_confidence_adjusted_edge_cents == 1.5
+    assert c.time_to_resolution_size_floor_days == 1.0
     assert c.category_allowlist == [
         "crypto",
         "financial",
@@ -134,6 +143,7 @@ def test_live_mode_defaults_keep_strict_filter_and_edge_gates(monkeypatch):
     assert c.min_edge_pct == 7
     assert c.min_adjusted_edge_pct == 5
     assert c.max_spread_cents_edge == 6
+    assert c.max_spread_cost_of_entry_pct_edge == 15
     assert c.min_confidence_adjusted_edge_cents == 4.0
 
 
@@ -164,6 +174,11 @@ def test_env_example_contains_required_safety_variables():
     assert _env_value(text, "MIN_ORDERBOOK_DEPTH_AT_LIMIT") == "25"
     assert _env_value(text, "MIN_EDGE_PCT") == "4"
     assert _env_value(text, "MIN_ADJUSTED_EDGE_PCT") == "2"
+    assert _env_value(text, "MAX_CANDIDATES_PER_RUN") == "25"
+    assert _env_value(text, "MAX_RESEARCH_MARKETS_PER_RUN") == "15"
+    assert _env_value(text, "SLIPPAGE_CENTS") == "2"
+    assert _env_value(text, "MAX_SPREAD_COST_OF_ENTRY_PCT_EDGE") == "20"
+    assert _env_value(text, "TIME_TO_RESOLUTION_SIZE_FLOOR_DAYS") == "1.0"
     assert (
         _env_value(text, "CATEGORY_ALLOWLIST")
         == "crypto,financial,economic,commodities,weather,science and technology,culture"

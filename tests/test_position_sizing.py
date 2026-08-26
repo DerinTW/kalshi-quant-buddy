@@ -34,6 +34,7 @@ def market(
     *,
     liquidity_dollars: float = 10_000.0,
     orderbook_depth: int = 0,
+    minutes_to_settlement: float = 120.0,
 ) -> Market:
     now = datetime.now(timezone.utc)
     m = Market(
@@ -47,13 +48,13 @@ def market(
         volume=10_000,
         volume_24h=5_000,
         open_interest=2_000,
-        close_time=now + timedelta(hours=2),
-        settlement_time=now + timedelta(hours=2),
+        close_time=now + timedelta(minutes=minutes_to_settlement),
+        settlement_time=now + timedelta(minutes=minutes_to_settlement),
         category="crypto",
         rules_primary="rules",
     )
-    m.minutes_to_close = 120
-    m.minutes_to_settlement = 120
+    m.minutes_to_close = minutes_to_settlement
+    m.minutes_to_settlement = minutes_to_settlement
     m.liquidity_dollars = liquidity_dollars
     m.orderbook_depth = orderbook_depth
     return m
@@ -190,6 +191,46 @@ def test_does_not_use_kelly_confidence_or_edge_scaling():
 
     assert conservative.contracts == aggressive.contracts
     assert conservative.dollars == pytest.approx(aggressive.dollars)
+
+
+def test_execution_risk_penalty_reduces_size_directly():
+    size = position_sizing.compute(
+        market(),
+        edge_result(entry_price_cents=40),
+        estimate(confidence_breakdown={"execution_risk_penalties": ["near_resolution"]}),
+        cfg(),
+    )
+
+    assert size.contracts == 12
+    assert size.dollars == pytest.approx(4.8)
+
+
+def test_time_to_resolution_haircut_reduces_long_horizon_size():
+    size = position_sizing.compute(
+        market(minutes_to_settlement=4 * 24 * 60),
+        edge_result(entry_price_cents=40),
+        estimate(),
+        cfg(),
+    )
+
+    assert position_sizing.time_to_resolution_size_multiplier(
+        market(minutes_to_settlement=4 * 24 * 60),
+        cfg(),
+    ) == pytest.approx(0.5)
+    assert size.contracts == 12
+    assert size.dollars == pytest.approx(4.8)
+
+
+def test_time_to_resolution_haircut_does_not_boost_intraday_size():
+    size = position_sizing.compute(
+        market(minutes_to_settlement=6 * 60),
+        edge_result(entry_price_cents=40),
+        estimate(),
+        cfg(),
+    )
+
+    assert size.contracts == 25
+    assert size.dollars == pytest.approx(10.0)
 
 
 def test_handles_yes_entry_price():

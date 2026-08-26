@@ -160,12 +160,14 @@ class Config:
     # Edge thresholds
     min_edge_pct: float = field(default_factory=lambda: _env_float_mode(("MIN_EDGE_PCT",), "4", "7"))
     min_adjusted_edge_pct: float = field(default_factory=lambda: _env_float_mode(("MIN_ADJUSTED_EDGE_PCT",), "2", "5"))
-    slippage_cents: int = field(default_factory=lambda: int(os.getenv("SLIPPAGE_CENTS", "2")))
+    slippage_cents: float = field(default_factory=lambda: _env_float(("SLIPPAGE_CENTS",), "2"))
     fee_pct: float = field(default_factory=lambda: float(os.getenv("FEE_PCT", "0.0")))
     min_confidence: float = field(default_factory=lambda: float(os.getenv("MIN_CONFIDENCE", "0.65")))
     min_confidence_adjusted_edge_cents: float = field(default_factory=lambda: _env_float_mode(("MIN_CONFIDENCE_ADJUSTED_EDGE_CENTS",), "1.5", "4.0"))
     # Spread gate applied at the edge layer (stricter than the filter's max_spread_cents)
     max_spread_cents_edge: int = field(default_factory=lambda: _env_int_mode(("MAX_SPREAD_CENTS_EDGE",), "10", "6"))
+    # Half-spread as a percentage of entry cost; catches cheap contracts with ugly relative spreads.
+    max_spread_cost_of_entry_pct_edge: float = field(default_factory=lambda: _env_float_mode(("MAX_SPREAD_COST_OF_ENTRY_PCT_EDGE",), "20", "15"))
 
     # Risk limits
     max_trade_dollars: float = field(default_factory=lambda: _env_float(("MAX_DOLLARS_PER_TRADE", "MAX_TRADE_DOLLARS"), "10"))
@@ -173,6 +175,9 @@ class Config:
     max_position_pct_of_bankroll: float = field(default_factory=lambda: _env_float(("MAX_BANKROLL_PCT_PER_TRADE", "MAX_POSITION_PCT_OF_BANKROLL"), "0.5"))
     max_correlated_exposure_dollars: float = field(default_factory=lambda: _env_float(("MAX_CORRELATED_EXPOSURE", "MAX_CORRELATED_EXPOSURE_DOLLARS"), "15"))
     max_category_exposure_dollars: float = field(default_factory=lambda: _env_float(("MAX_CATEGORY_EXPOSURE", "MAX_CATEGORY_EXPOSURE_DOLLARS"), "25"))
+    # Long-settlement contracts tie up collateral longer; scale size by
+    # 1 / sqrt(days_to_settlement), capped at 1.0 for short-horizon markets.
+    time_to_resolution_size_floor_days: float = field(default_factory=lambda: _env_float(("TIME_TO_RESOLUTION_SIZE_FLOOR_DAYS",), "1.0"))
     # Daily circuit breakers
     max_daily_loss_dollars: float = field(default_factory=lambda: _env_float(("MAX_DAILY_LOSS", "MAX_DAILY_LOSS_DOLLARS"), "20"))
     max_trades_per_day: int = field(default_factory=lambda: _env_int(("MAX_TRADES_PER_DAY",), "5"))

@@ -190,6 +190,22 @@ def test_get_all_markets_honors_max_markets(monkeypatch):
     ]
 
 
+def test_get_orderbooks_passes_tickers_to_bulk_endpoint(monkeypatch):
+    client = object.__new__(KalshiClient)
+    calls = []
+
+    def fake_get(path, params=None):
+        calls.append((path, params))
+        return {"orderbooks": []}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+
+    assert client.get_orderbooks(["KXA", "KXB"]) == {"orderbooks": []}
+    assert calls == [
+        ("/markets/orderbooks", {"tickers": ["KXA", "KXB"]}),
+    ]
+
+
 def test_get_best_prices_parses_current_orderbook_fp_shape(monkeypatch):
     client = object.__new__(KalshiClient)
 
