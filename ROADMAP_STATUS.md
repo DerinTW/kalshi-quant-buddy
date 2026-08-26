@@ -2,7 +2,7 @@
 
 Audit date: 2026-05-15
 Branch: `main`
-Test suite: `python -m pytest` → **425 passed, 0 failed** (UTC timestamp deprecation warnings resolved).
+Test suite: `python -m pytest` → **441 passed, 0 failed** (UTC timestamp deprecation warnings resolved).
 Entry points:
 - `python main.py --init-only` → initialises log dir + sqlite DB, exits cleanly.
 - `python main.py` → logs `startup_safe_mode` and exits. No autonomous loop is started, as required.
@@ -252,7 +252,7 @@ Non-blocking polish
 5. Decide whether postmortems should mirror to `logs/postmortems.jsonl` for parity with the blueprint wording.
 
 Run results
-- `python -m pytest` → 425 passed, 0 failed.
+- `python -m pytest` → 441 passed, 0 failed.
 - `python main.py --init-only` → exits cleanly, logs `initialized`.
 - `python main.py` → exits cleanly, logs `startup_safe_mode`, does **not** start a loop.
 - No code changes were required to get the suite green; no safety checks were touched.
